@@ -14,7 +14,6 @@ experiment-*
 **/.mypy_cache/*
 .mypy_cache/*
 not_tracked_dir/
-.vscode
 output/*/*.pth
 output/*/eval/
 imgs/
