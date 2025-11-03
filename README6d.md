@@ -10,8 +10,8 @@ Quick steps to get the pose estimation pipeline running.
 
 ## 1) Git: clone and checkout branch
 ```bash
-git clone  pose-estimation
-cd pose-estimation
+git clone  
+cd lw-detr6d
 git checkout 6d
 ```
 
