@@ -31,6 +31,12 @@ def box_xyxy_to_cxcywh(x):
          (x1 - x0), (y1 - y0)]
     return torch.stack(b, dim=-1)
 
+def box_normalize_cxcywh(x, image_size):
+    # Image Size the same for boxes of the same image
+    x_c, y_c, w, h = x.unbind(-1)
+    i_h, i_w = image_size
+    b = [x_c / i_w, y_c / i_h, w / i_w, h / i_h]
+    return torch.stack(b, dim=-1)
 
 # modified from torchvision to also return the union
 def box_iou(boxes1, boxes2):

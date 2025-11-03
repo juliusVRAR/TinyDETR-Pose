@@ -483,3 +483,14 @@ def inverse_sigmoid(x, eps=1e-5):
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1/x2)
+
+def get_local_rank():
+    if not is_dist_avail_and_initialized():
+        return 0
+    return int(os.environ['LOCAL_RANK'])
+
+def get_local_size():
+    if not is_dist_avail_and_initialized():
+        return 1
+    return int(os.environ['LOCAL_SIZE'])
+

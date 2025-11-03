@@ -15,21 +15,36 @@ COCO dataset which returns image_id for evaluation.
 
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
+import os
 from pathlib import Path
 
 import torch
 import torch.utils.data
 import torchvision
+from tqdm import tqdm
 
 import datasets.transforms as T
 
 
 class CocoDetection(torchvision.datasets.CocoDetection):
-    def __init__(self, img_folder, ann_file, transforms):
+    def __init__(self, 
+                 img_folder, 
+                 ann_file, 
+                 transforms,
+                 synthetic_background=None,
+                 cache_mode=False, 
+                 local_rank=0, 
+                 local_size=1):
         super(CocoDetection, self).__init__(img_folder, ann_file)
         self._transforms = transforms
         self.prepare = ConvertCoco()
-
+        self.cache_mode = cache_mode
+        self.local_rank = local_rank
+        self.local_size = local_size
+        if cache_mode:
+            self.cache = {}
+            self.cache_images()
+    
     def __getitem__(self, idx):
         img, target = super(CocoDetection, self).__getitem__(idx)
         image_id = self.ids[idx]
@@ -39,6 +54,14 @@ class CocoDetection(torchvision.datasets.CocoDetection):
             img, target = self._transforms(img, target)
         return img, target
 
+    def cache_images(self):
+        self.cache = {}
+        for index, img_id in zip(tqdm.trange(len(self.ids)), self.ids):
+            if index % self.local_size != self.local_rank:
+                continue
+            path = self.coco.loadImgs(img_id)[0]['file_name']
+            with open(os.path.join(self.root, path), 'rb') as f:
+                self.cache[path] = f.read()
 
 class ConvertCoco(object):
 

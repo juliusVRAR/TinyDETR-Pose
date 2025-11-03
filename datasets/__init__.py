@@ -12,7 +12,7 @@
 
 import torch.utils.data
 import torchvision
-
+import data_utils.torchvision_datasets 
 from .coco import build as build_coco
 from .o365 import build_o365
 
@@ -22,6 +22,8 @@ def get_coco_api_from_dataset(dataset):
         if isinstance(dataset, torch.utils.data.Subset):
             dataset = dataset.dataset
     if isinstance(dataset, torchvision.datasets.CocoDetection):
+        return dataset.coco
+    elif isinstance(dataset,data_utils.torchvision_datasets.CocoDetection):
         return dataset.coco
 
 

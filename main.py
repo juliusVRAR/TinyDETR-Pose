@@ -25,19 +25,20 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-
-from datasets import build_dataset, get_coco_api_from_dataset
-from engine import evaluate, train_one_epoch
+from datasets import get_coco_api_from_dataset
+from data_utils import build_dataset
+from engine import evaluate, train_one_epoch, pose_evaluate, bop_evaluate
 from models import build_model
 from util.drop_scheduler import drop_scheduler
 from util.get_param_dicts import get_param_dict
 import util.misc as utils
 from util.utils import ModelEma, BestMetricHolder, clean_state_dict
 from util.benchmark import benchmark
-
-
+from evaluation_tools.pose_evaluator_init import build_pose_evaluator
+from torch.utils.tensorboard import SummaryWriter
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
+    # Learnining hyperparameters
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_encoder', default=1.5e-4, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
@@ -118,13 +119,40 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
+    parser.add_argument('--set_cost_rotation', default=1, type=float,
+                        help="rotation coefficient in the matching cost")
+    parser.add_argument('--set_cost_translation', default=1, type=float,
+                        help="translation coefficient in the matching cost")
+    parser.add_argument('--matcher_type', default='6d', choices=['pose', '6d', 'hungarian'], type=str,
+                        help="Type of matcher to use, hungarian is the 3d match from lwdetr and will probably not work")
 
+    # PoET Config
+    parser.add_argument('--bbox_mode', default='backbone', type=str, choices=('gt', 'backbone', 'jitter'),
+                        help='Defines which bounding boxes should be used for PoET to determine query embeddings.')
+    parser.add_argument('--im_size', type=int, nargs=2, default=(512, 640)) # Must be divisible by 64
+    parser.add_argument('--num_feature_levels', default=4, type=int, help='number of feature levels')
+    parser.add_argument('--reference_points', default='bbox', type=str, choices=('bbox', 'learned'),
+                        help='Defines whether the transformer reference points are learned or extracted from the bounding boxes')
+    parser.add_argument('--class_mode', default='specific', type=str, choices=('agnostic', 'specific'),
+                        help="Determine whether PoET ist trained class-specific or class-agnostic")
+    parser.add_argument('--rotation_representation', default='6d', type=str, choices=('6d', 'quat', 'silho_quat'),
+                        help="Determine the rotation representation with which PoET is trained.")
+    
+    parser.add_argument('--query_embedding', default='bbox', type=str, choices=('bbox', 'learned'),
+                        help='Defines whether the transformer query embeddings are learned or determined by the bounding boxes')
+    # * Uncertainty Configs
+    parser.add_argument('--aleatoric', action='store_true', help="Extend PoET for aleatoric uncertainty estimation by adding dedicated aleatoric uncertainty heads.")
+    parser.add_argument('--calibrate', action='store_true', help="Only train the aleatoric uncertainty heads, freeze all other weights.")
     # * Loss coefficients
     parser.add_argument('--cls_loss_coef', default=2, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     parser.add_argument('--focal_alpha', default=0.25, type=float)
     
+    # * Loss coefficients
+    # Pose Estimation losses
+    parser.add_argument('--translation_loss_coef', default=1, type=float, help='Loss weighing parameter for the translation')
+    parser.add_argument('--rotation_loss_coef', default=1, type=float, help='Loss weighing parameter for the rotation')
     # Loss
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
@@ -134,14 +162,35 @@ def get_args_parser():
     parser.add_argument('--use_position_supervised_loss', action='store_true')
     parser.add_argument('--ia_bce_loss', action='store_true')
 
-    # dataset parameters
-    parser.add_argument('--dataset_file', default='coco')
-    parser.add_argument('--coco_path', type=str)
-    parser.add_argument('--square_resize_div_64', action='store_true')
 
+
+    # dataset parameters
+    parser.add_argument('--dataset_file', default='ycbv', type=str, choices=('ycbv', 'lmo'))
+    parser.add_argument('--square_resize_div_64', action='store_true')
+    parser.add_argument('--dataset_path', default='/data', type=str,
+                        help='Path to the dataset')
+    parser.add_argument('--train_set', default="train_real", type=str, help="Determine on which dataset split to train")
+    parser.add_argument('--eval_set', default="test", type=str, help="Determine on which dataset split to evaluate")
+    parser.add_argument('--synt_background', default=None, type=str,
+                        help="Directory containing the background images from which to sample")
+    parser.add_argument('--camera', default='camera_uw.json', type=str,
+                        help='Camera intrisics file. This should be loacted at the root of the dataset.')
+    parser.add_argument('--n_classes', default=21, type=int,
+                        help='number of object categories, this is ignored if you set dataset_file to ycbv')
+    parser.add_argument('--jitter_probability', default=0.5, type=float,
+                        help='If bbox_mode is set to jitter, this value indicates the probability '
+                             'that jitter is applied to a bounding box.')
+    parser.add_argument('--rgb_augmentation', action='store_true',
+                        help='Activate image augmentation for training pose estimation.')
+    parser.add_argument('--grayscale', action='store_true', help='Activate grayscale augmentation.')
+    
+    # Data augmentations TODO: add yolox6d 
+    parser.add_argument('--mosaic', action='store_true',
+                        help='Whether to use mosaic augmentation (from yolox6d).')
+    # output and logging
     parser.add_argument('--output_dir', default='output',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--checkpoint_interval', default=10, type=int,
+    parser.add_argument('--checkpoint_interval', default=1, type=int,
                         help='epoch interval to save checkpoint')
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
@@ -152,6 +201,9 @@ def get_args_parser():
     parser.add_argument('--ema_decay', default=0.9997, type=float)
     parser.add_argument('--num_workers', default=2, type=int)
 
+    parser.add_argument('--eval_bop', action='store_true', help="Run model in BOP challenge evaluation mode")
+
+    parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
     # distributed training parameters
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -165,6 +217,31 @@ def get_args_parser():
     # fp16
     parser.add_argument('--fp16_eval', default=False, action='store_true',
                         help='evaluate in fp16 precision.')
+    # * Evaluator
+    parser.add_argument('--eval_interval', type=int, default=10,
+                        help="Epoch interval after which the current model is evaluated")
+    parser.add_argument('--class_info', type=str, default='/annotations/classes.json',
+                        help='path to .txt-file containing the class names')
+    parser.add_argument('--models', type=str, default='/models_eval/',
+                        help='path to a directory containing the classes models')
+    parser.add_argument('--model_symmetry', type=str, default='/annotations/symmetries.json',
+                        help='path to .json-file containing the class symmetries')
+    # Tensorboard
+    parser.add_argument('--tensorboard', action='store_true',
+                        help='Enable TensorBoard logging')
+    parser.add_argument('--tb_iter_freq', type=int, default=100,
+                        help='Iteration frequency for TB logging (optional)')
+    ## Eval modes
+    parser.add_argument('--eval_only', action='store_true',
+                        help='Run standard evaluation and exit (no training)')
+    parser.add_argument('--pose_eval_only', action='store_true',
+                        help='Run pose evaluation (requires --resume) and exit')
+    parser.add_argument('--eval_batches', type=int, default=-1,
+                        help='Limit number of eval batches for quick debug (-1 = all)')
+    parser.add_argument('--skip_pose_eval', action='store_true',
+                        help='Skip pose evaluation during --eval / training')
+    parser.add_argument('--skip_coco_eval', action='store_true',
+                        help='Skip box/coco evaluation, run pose only')
 
     # subparsers
     subparsers = parser.add_subparsers(title='sub-commands', dest='subcommand',
@@ -189,36 +266,47 @@ def main(args):
     print(args)
 
     device = torch.device(args.device)
-
+     # TensorBoard writer
+    writer = None
+    if getattr(args, "tensorboard", False):
+        log_dir = Path(args.output_dir) / "tb" if args.output_dir else Path("./tb")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        writer = SummaryWriter(str(log_dir))
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
-    model, criterion, postprocessors = build_model(args)
+    model, criterion, postprocessors, matcher = build_model(args)
     model.to(device)
+
+    pose_evaluator = build_pose_evaluator(args)
+    
     if args.use_ema:
         ema_m = ModelEma(model, decay=args.ema_decay)
     else:
         ema_m = None
     model_without_ddp = model
+    
     if args.distributed:
         if args.sync_bn:
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
+    
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
     param_dicts = get_param_dict(args, model_without_ddp)
 
+    # TODO: Muon optimizer testing for larger models
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, 
                                   weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
-
-    dataset_train = build_dataset(image_set='train', args=args)
-    dataset_val = build_dataset(image_set='val', args=args)
-
+    
+    # Build the dataset for training and validation
+    dataset_train = build_dataset(image_set=args.train_set, args=args)
+    dataset_val = build_dataset(image_set=args.eval_set, args=args)
     if args.distributed:
         sampler_train = DistributedSampler(dataset_train)
         sampler_val = DistributedSampler(dataset_val, shuffle=False)
@@ -234,9 +322,9 @@ def main(args):
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, 
                                  num_workers=args.num_workers)
-
     base_ds = get_coco_api_from_dataset(dataset_val)
-
+    
+   
     if args.pretrain_weights is not None:
         checkpoint = torch.load(args.pretrain_weights, map_location='cpu')
         # add support to exclude_keys
@@ -286,12 +374,38 @@ def main(args):
             args.start_epoch = checkpoint['epoch'] + 1
 
     if args.eval:
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args)
-        if args.output_dir:
-            utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+        # test_stats, coco_evaluator = evaluate(
+        #     model, criterion, postprocessors, data_loader_val, base_ds, device, args)
+        # if args.output_dir:
+        #     utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+        if args.resume:
+            eval_epoch = checkpoint['epoch']
+        else:
+            eval_epoch = None
+        pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
+                      args.rotation_representation, device, args.output_dir, eval_epoch)
         return
-    
+    # Evaluate the model for the BOP challenge
+    if args.eval_bop:
+        print(args.dataset)
+        bop_evaluate(model, matcher, data_loader_val, args.eval_set, args.bbox_mode,
+                     args.rotation_representation, device, args.output_dir, args.dataset)
+        return
+
+    if args.calibrate:
+        # Freeze all model weights except for the aleatoric uncertainty heads
+        print("Freezing all model weights except for the aleatoric uncertainty heads.")
+        for name, param in model.transformer.named_parameters():
+            param.requires_grad = False
+        for name, param in model.input_proj.named_parameters():
+            param.requires_grad = False
+        for name, param in model.translation_head.named_parameters():
+            param.requires_grad = False
+        for name, param in model.rotation_head.named_parameters():
+            param.requires_grad = False
+
+
+
     # for drop
     total_batch_size = args.batch_size * utils.get_world_size()
     num_training_steps_per_epoch = (len(dataset_train) + total_batch_size - 1) // total_batch_size
@@ -316,19 +430,40 @@ def main(args):
         if args.distributed:
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm, ema_m=ema_m, schedules=schedules, 
+            model, 
+            criterion, 
+            data_loader_train, 
+            optimizer, 
+            device, 
+            epoch,
+            args.clip_max_norm, 
+            ema_m=ema_m, 
+            schedules=schedules, 
             num_training_steps_per_epoch=num_training_steps_per_epoch,
-            vit_encoder_num_layers=args.vit_encoder_num_layers, args=args)
+            vit_encoder_num_layers=args.vit_encoder_num_layers, 
+            args=args, 
+            writer=writer)
+        # TensorBoard logging
+        # Per-epoch scalars
+        if writer:
+            # Global losses (reduced)
+            for k, v in train_stats.items():
+                if isinstance(v, (int, float)):
+                    writer.add_scalar(f"train/{k}", v, epoch)
+            # Individual loss components
+            for k, v in train_stats.get("loss_components", {}).items():
+                writer.add_scalar(f"train/{k}", v, epoch)
+
         train_epoch_time = time.time() - epoch_start_time
         train_epoch_time_str = str(datetime.timedelta(seconds=int(train_epoch_time)))
         
         lr_scheduler.step()
+        
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
             # extra checkpoint before LR drop and every `checkpoint_interval` epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.checkpoint_interval == 0:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+            #if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.checkpoint_interval == 0:
+            checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}_new.pth')
             for checkpoint_path in checkpoint_paths:
                 weights = {
                     'model': model_without_ddp.state_dict(),
@@ -346,7 +481,21 @@ def main(args):
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_loader_val, base_ds, device, args=args
         )
+        pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
+                      args.rotation_representation, device, args.output_dir, eval_epoch)
         
+        if writer:
+            # Validation metrics
+            for k, v in test_stats.items():
+                if isinstance(v, (list, tuple)):
+                    # e.g. coco_eval_bbox[0]
+                    writer.add_scalar(f"val/{k}", v[0], epoch)
+                elif isinstance(v, (int, float)):
+                    writer.add_scalar(f"val/{k}", v, epoch)
+
+    if writer:
+        writer.close()
+
         map_regular = test_stats['coco_eval_bbox'][0]
         _isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
         if _isbest:
@@ -366,6 +515,8 @@ def main(args):
             ema_test_stats, _ = evaluate(
                 ema_m.module, criterion, postprocessors, data_loader_val, base_ds, device, args=args
             )
+            pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
+                      args.rotation_representation, device, args.output_dir, eval_epoch)
             log_stats.update({f'ema_test_{k}': v for k,v in ema_test_stats.items()})
             map_ema = ema_test_stats['coco_eval_bbox'][0]
             _isbest = best_map_holder.update(map_ema, epoch, is_ema=True)

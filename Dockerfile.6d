@@ -1,0 +1,53 @@
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV TZ=Etc/UTC
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    wget \
+    curl \
+    build-essential \
+    python3.10 \
+    python3-pip \
+    python3-venv  \
+    libfreeimage3 \
+    libgl1 \
+    libglib2.0-0 \
+    libgles2-mesa-dev \
+    libglfw3-dev \
+    libxkbcommon-x11-0 \ 
+    libsm6 \
+    libxrender1 \
+    libxi6 \ 
+    libxext6 \
+    libxrender1 \
+    libxkbcommon0 \
+    && rm -rf /var/lib/apt/lists/*
+    
+# Set up the working directory
+WORKDIR /workspace
+
+# Create virtual environment
+RUN python3.10 -m venv /venvs/lwdetr6d
+# Activate the virtual environment
+ENV PATH="/venvs/lwdetr6d/bin:$PATH"
+ADD requirements.txt requirements.txt
+RUN pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+RUN pip install -r requirements.txt
+RUN pip install opencv-python==4.12.0.88
+RUN pip install matplotlib==3.10.7
+RUN pip install imageio==2.37.0
+RUN pip install trimesh
+RUN pip install tensorboard
+RUN pip install torch-tb-profiler==0.4.3
+
+# Do this in side the container after starting it the first time:
+# Compiling CUDA operators
+# cd /workspace/LWDETR/models/ops
+#  python setup.py build install
+# python test.py
+
