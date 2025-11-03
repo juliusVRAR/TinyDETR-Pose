@@ -126,6 +126,29 @@ class PositionEmbeddingLearned(nn.Module):
         ], dim=-1).unsqueeze(2).repeat(1, 1, x.shape[2], 1)
         # return: (H, W, bs, C)
         return pos
+    
+class BoundingBoxEmbeddingSine(nn.Module):
+    """
+    Positional embedding of bounding box coordinates.
+    """
+    def __init__(self, num_pos_feats=32):
+        super().__init__()
+        self.num_pos_feats = num_pos_feats
+
+    def forward(self, bboxes: torch.Tensor):
+        # Assuming only the bboxes for a single image get passed
+        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=bboxes.device)
+        dim_t = 2 ** dim_t
+        x_enc = bboxes[:, 0, None] * dim_t
+        y_enc = bboxes[:, 1, None] * dim_t
+        w_enc = bboxes[:, 2, None] * dim_t
+        h_enc = bboxes[:, 3, None] * dim_t
+        x_enc = torch.cat((x_enc.sin(), x_enc.cos()), dim=-1)
+        y_enc = torch.cat((y_enc.sin(), y_enc.cos()), dim=-1)
+        w_enc = torch.cat((w_enc.sin(), w_enc.cos()), dim=-1)
+        h_enc = torch.cat((h_enc.sin(), h_enc.cos()), dim=-1)
+        pos_embed = torch.cat((x_enc, y_enc, w_enc, h_enc), dim=-1)
+        return pos_embed
 
 
 def build_position_encoding(args):

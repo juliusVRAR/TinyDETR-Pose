@@ -124,7 +124,7 @@ def gen_encoder_output_proposals(memory, memory_padding_mask, spatial_shapes, un
 
     return output_memory.to(memory.dtype), output_proposals.to(memory.dtype)
 
-
+# Encoder
 class Transformer(nn.Module):
 
     def __init__(self, d_model=512, sa_nhead=8, ca_nhead=8, num_queries=300,
@@ -135,6 +135,7 @@ class Transformer(nn.Module):
                  num_feature_levels=4, dec_n_points=4,
                  lite_refpoint_refine=False,
                  decoder_norm_type='LN',
+                 rotation_mode='6d',
                  bbox_reparam=False):
         super().__init__()
         self.encoder = None
@@ -163,7 +164,30 @@ class Transformer(nn.Module):
         if two_stage:
             self.enc_output = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(group_detr)])
             self.enc_output_norm = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(group_detr)])
+        
+        #################6D Heads########################
+        self.rotation_mode = rotation_mode
+        # Determine Translation and Rotation head output dimension
+        self.t_dim = 3 #xyz
+        # Alternative use the YOLOX6D approach they split translation into 2D center (xy) + depth (z)
+        if self.rotation_mode == '6d':
+            self.rot_dim = 6 # GramSchmidt
+        elif self.rotation_mode in ['quat', 'silho_quat']:
+            self.rot_dim = 4
+        else:
+            raise NotImplementedError('Rotational representation is not supported.')
 
+        self.dec_rot_head  = nn.ModuleList([MLP(input_dim=d_model, 
+                                                hidden_dim=d_model, 
+                                                output_dim=self.rot_dim,
+                                                num_layers=3) 
+                                                for _ in range(group_detr)])
+        self.dec_trans_head = nn.ModuleList([MLP(input_dim=d_model, 
+                                                 hidden_dim=d_model, 
+                                                 output_dim=self.t_dim, 
+                                                 num_layers=3) 
+                                                 for _ in range(group_detr)])
+        ####################################################
         self._reset_parameters()
 
         self.num_queries = num_queries
@@ -287,7 +311,7 @@ class Transformer(nn.Module):
                 return hs, references, memory_ts, boxes_ts.sigmoid()
         return hs, references, None, None
 
-
+# Decoder
 class TransformerDecoder(nn.Module):
 
     def __init__(self,
