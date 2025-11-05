@@ -112,6 +112,16 @@ class PoseDataset(CocoDetection):
         self.cad_model_path = cad_models_path
         self.models_info = load_json(Path(cad_models_path, "models_info.json"))
         
+        # Precompute diameter lookup (id -> float)
+        self._diameters = {}
+        for k, v in self.models_info.items():
+            try:
+                obj_id = int(k)
+                if isinstance(v, dict) and 'diameter' in v:
+                    self._diameters[obj_id] = float(v['diameter'])
+            except Exception:
+                continue
+
         # Load class-id ↔ name mapping
         self._class_id_to_name = {}
         if class_info is not None and Path(class_info).is_file():
@@ -205,6 +215,7 @@ class PoseDataset(CocoDetection):
                     box[3] = box[3] * (1 + truncnorm.rvs(ha, hb, loc=0, scale=self.std))
             #TODO: if jitter the mosaic has to augment these...
             target["jitter_boxes"] = jitter_boxes
+        # if DEBUG
         if False:
             debug_img = img.permute(1,2,0).numpy()
             # Bring back to colorspace 0-255 and BGR -> RGB
@@ -224,10 +235,11 @@ class PoseDataset(CocoDetection):
             # Save Visualization of the 2D bboxes
             save_annotated_image(image=img,targets=target)  
         
+        ### CAD Models needed for this part ### 
         # Build symmetry flags aligned with boxes / labels
         labels = target.get("labels", torch.empty(0, dtype=torch.int64))
         # Attach per-target model points (shared tensor per object)
-        if len(labels):
+        if len(labels) and self.models_info is not None:
             # Stack object-specific point sets: (num_objs, N, 3)
             pts_list = []
             for cid in labels.tolist():
@@ -248,12 +260,20 @@ class PoseDataset(CocoDetection):
             if name is not None:
                 flag = self._symmetry_info.get(name, False)
             is_symmetric_list.append(flag)
-        if len(is_symmetric_list):
+        if len(is_symmetric_list) and self.models_info is not None:
             target["is_symmetric"] = torch.as_tensor(is_symmetric_list, dtype=torch.bool)
         else:
             target["is_symmetric"] = torch.zeros(0, dtype=torch.bool)
 
-        return img, target 
+        if len(labels) and self.models_info is not None:
+            diam_list = []
+            for cid in labels.tolist():
+                diam_list.append(self._diameters.get(int(cid), 0.0))  # fallback 0.0
+            target["diameter"] = torch.as_tensor(diam_list, dtype=torch.float32)
+        else:
+            target["diameter"] = torch.zeros(0, dtype=torch.float32)
+
+        return img, target
 
 
 def convert_coco_poly_to_mask(segmentations, height, width):
@@ -430,8 +450,6 @@ class ProcessPoseData(object):
 
         target["orig_size"] = torch.as_tensor([int(h), int(w)])
         target["size"] = torch.as_tensor([int(h), int(w)])
-
-
 
         return image, target
     
@@ -919,6 +937,8 @@ def build(image_set, args):
         class_info = Path(str(root) + args.class_info)
     else:
         class_info = None
+    # Set seed when training for reproducibility
+    seed = torch.manual_seed(0)
     dataset = PoseDataset(img_folder, ann_file, 
                           im_size=im_size, 
                           synthetic_background=args.synt_background,
@@ -936,13 +956,14 @@ def build(image_set, args):
                           use_mosaic=args.mosaic,
                           cad_models_path=cad_model_path,
                           model_symmetry=model_symmetry,
-                          class_info=class_info)
+                          class_info=class_info,
+                          mesh_point_seed=0)
+    
     if args.mosaic and 'train' in image_set:
         print("Creating Mosaic Augmentation")
         dataset_mosaic = MosaicDetection(
                 dataset,
-                mosaic=True,
-                
+                mosaic=True,  
         )
         return dataset_mosaic    
     else:

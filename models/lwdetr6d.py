@@ -27,7 +27,7 @@ from util import box_ops
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size,
                        is_dist_avail_and_initialized)
-from util.rotation_utils import rotation_6d_to_matrix, rotation_6d_simple_to_matrix
+from util.rotation_utils import rotation_6d_to_matrix, rotation_6d_simple_to_matrix, rotation_matrix_to_raw_6d
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .transformer import build_transformer
@@ -336,9 +336,9 @@ class SetCriterion(nn.Module):
         self.ia_bce_loss = ia_bce_loss
         # Needed for Yolox6d losses
         self.mae_loss = nn.L1Loss(reduction="none")
+        self.shape_loss = False
 
-
-    ############################################
+    ###################PoET no CAD needed#########################
     # Pose losses
     def loss_translation(self, outputs, targets, indices, num_boxes=None):
         """
@@ -384,27 +384,229 @@ class SetCriterion(nn.Module):
         losses = {}
         losses["loss_rot"] = rad.sum() / n_obj
         return losses
+    ###################PoET Losses#########################
+
     ############### Losses proposed in yolox6d ######################
+    #### My ADD-S and Rot loss. TODO: Check if it differs from the YOLOX6d implementation
+    def loss_adds(self, 
+                  outputs, 
+                  targets, 
+                  indices, 
+                  num_boxes=None, 
+                  shape_loss=False):
+        """
+        ADD / ADD-S loss (mean normalized point distance).
+        shape_loss: if True ignore translation (rotation-only shape alignment).
+        outputs:
+            pred_rotation: (B,Q,3,3)
+            pred_translation: (B,Q,3)
+        targets per batch element:
+            relative_rotation or rotation: (N,3,3)
+            relative_position or translation: (N,3)
+            model_points: (N,P,3)
+            diameter: (N,)
+            is_symmetric: (N,) bool
+        indices: list of (pred_idx, tgt_idx)
+        """
+        # Accept both naming conventions in targets
+        device = outputs['pred_rotation'].device
+        pred_R = outputs['pred_rotation']
+        pred_t = outputs['pred_translation']
+
+        total_point_loss = 0.0
+        total_instances = 0
+
+        for b, (pi, ti) in enumerate(indices):
+            if len(pi) == 0:
+                continue
+            tgt = targets[b]
+            R_p = pred_R[b][pi]  # (M,3,3)
+            t_p = pred_t[b][pi]  # (M,3)
+            R_g = tgt.get('relative_rotation')[ti]      # (M,3,3)
+            t_g = tgt.get('relative_position')[ti]   # (M,3)
+            pts  = tgt['model_points'][ti]        # (M,P,3)
+            diam = tgt['diameter'][ti]            # (M,)
+            sym  = tgt['is_symmetric'][ti].to(torch.bool)  # (M,)
+
+            # Transform points (omit translation if shape_loss)
+            if shape_loss:
+                pts_pred = (R_p @ pts.transpose(1,2)).transpose(1,2)  # (M,P,3)
+                pts_gt   = (R_g @ pts.transpose(1,2)).transpose(1,2)  # (M,P,3)
+            else:
+                pts_pred = (R_p @ pts.transpose(1,2) + t_p.unsqueeze(-1)).transpose(1,2)
+                pts_gt   = (R_g @ pts.transpose(1,2) + t_g.unsqueeze(-1)).transpose(1,2)
+
+            # Non-symmetric distances
+            diff = pts_pred - pts_gt
+            d_nonsym = diff.norm(dim=-1).mean(dim=-1)  # (M,)
+
+            # Symmetric subset (ADD-S)
+            if sym.any():
+                sym_idx = torch.where(sym)[0]
+                pp = pts_pred[sym_idx]
+                gg = pts_gt[sym_idx]
+                d_pair = torch.cdist(pp, gg, p=2)                 # (Ms,P,P)
+                d_sym = d_pair.min(dim=-1).values.mean(dim=-1)    # (Ms,)
+                d_all = d_nonsym.clone()
+                d_all[sym_idx] = d_sym
+            else:
+                d_all = d_nonsym
+
+            diam_safe = torch.clamp(diam, min=1e-6)
+            inst_loss = (d_all / diam_safe).mean()
+            total_point_loss += inst_loss
+            total_instances += 1
+
+        if total_instances == 0:
+            loss_adds = torch.zeros((), device=device, requires_grad=True)
+        else:
+            loss_adds = total_point_loss / total_instances
+
+        # Key remains loss_adds (rotation-only if shape_loss True)
+        return {'loss_adds': loss_adds}
+    
+    def loss_adds_mse(self, 
+                outputs, 
+                targets, 
+                indices, 
+                num_boxes=None, 
+                shape_loss=False):
+        """
+        Compute ADD-S loss for 6D pose estimation.
+        ADD / ADD-S MSE loss (fully squared: distances² / diameter²).
+        Note: This differs from standard ADD/ADD-S metric which uses linear distances.
+
+        Args:
+            outputs: Dict containing:
+
+                - 'pred_rotation': Predicted rotation matrices [batch, num_queries, 3, 3]
+                - 'pred_translation': Predicted translations [batch, num_queries, 3]
+
+            targets: List of dicts, each containing:
+
+                - 'rotation': Ground-truth rotation [num_objects, 3, 3]
+                - 'translation': Ground-truth translation [num_objects, 3]
+
+                - 'model_points': 3D model points [num_objects, num_points, 3]
+                - 'diameter': Object diameter [num_objects]
+
+                - 'symmetric': Boolean mask [num_objects]
+
+                - 'shape_loss': if True ignore translation (use rotation-only shape alignment).
+
+            indices: List of (pred_idx, target_idx) tuples from matcher
+            num_boxes: Number of boxes for normalization
+        
+        Returns:
+            loss_dict: Dictionary with ADD-S loss
+        """
+        # Extract predictions
+        device = outputs['pred_rotation'].device
+        pred_rotations = outputs['pred_rotations']  # [batch, num_queries, 3, 3]
+        pred_translations = outputs['pred_translations']  # [batch, num_queries, 3]
+        # Flag precedence: explicit param overrides self.shape_loss
+        use_shape_loss = self.shape_loss if shape_loss is None else shape_loss
+        total_loss = 0.0
+        num_valid = 0
+        
+        # Iterate over batch
+        for batch_idx, (pred_idx, target_idx) in enumerate(indices):
+            if len(pred_idx) == 0:
+                continue
+                
+            # Get matched predictions
+            batch_pred_rot = pred_rotations[batch_idx][pred_idx]  # [num_matched, 3, 3]
+            batch_pred_trans = pred_translations[batch_idx][pred_idx]  # [num_matched, 3]
+            
+            # Get ground truth
+            target_data = targets[batch_idx]
+            batch_gt_rot = target_data['relative_rotation'][target_idx]  # [num_matched, 3, 3]
+            batch_gt_trans = target_data['relative_position'][target_idx]  # [num_matched, 3]
+            batch_model_points = target_data['model_points'][target_idx]  # [num_matched, num_points, 3]
+            batch_diameter = target_data['diameter'][target_idx]  # [num_matched]
+            batch_symmetric = target_data['is_symmetric'][target_idx]  # [num_matched]
+            
+            # Compute loss for each matched pair
+            for i in range(len(pred_idx)):
+                R_p = batch_pred_rot[i]  # [3, 3]
+                t_p = batch_pred_trans[i]  # [3]
+                R_g = batch_gt_rot[i]  # [3, 3]
+                t_g = batch_gt_trans[i]  # [3]
+                model_pts = batch_model_points[i]  # [num_points, 3]
+                diameter = batch_diameter[i]
+                is_symmetric = batch_symmetric[i]
+                
+                # Transform model points with predicted pose
+                # pts_pred = R_p @ model_pts.T + t_p -> [3, num_points]
+                pts_pred = torch.matmul(R_p, model_pts.T) + t_p.unsqueeze(1)
+                pts_pred = pts_pred.T  # [num_points, 3]
+                
+                # Transform model points with ground-truth pose
+                pts_gt = torch.matmul(R_g, model_pts.T) + t_g.unsqueeze(1)
+                pts_gt = pts_gt.T  # [num_points, 3]
+                
+                if is_symmetric:
+                    # ADD-S: For each predicted point, find closest ground-truth point
+                    # Compute pairwise distances: [num_points, num_points]
+                    diff = pts_pred.unsqueeze(1) - pts_gt.unsqueeze(0)  # [num_points, num_points, 3]
+                    distances = torch.norm(diff, dim=2)  # [num_points, num_points]
+                    
+                    # Take minimum distance for each predicted point
+                    min_distances, _ = torch.min(distances, dim=1)  # [num_points]
+                    point_loss = min_distances
+                else:
+                    # ADD: Direct point-to-point distance
+                    diff = pts_pred - pts_gt  # [num_points, 3]
+                    point_loss = torch.norm(diff, dim=1)  # [num_points]
+                
+                # Normalize by diameter and average over points
+                normalized_loss = (point_loss / diameter).pow(2).mean()
+                total_loss += normalized_loss
+                num_valid += 1
+        
+        # Average over all matched objects
+        if num_valid > 0:
+            loss = total_loss / num_valid
+        else:
+            loss = torch.tensor(0.0, device=pred_rotations.device, requires_grad=True)
+        # TODO: Rename this to loss_adds
+        return {'loss_rot': loss}
+    
     def loss_rot(self, 
                  outputs, 
                  targets, 
-                 indices, 
-                 num_boxes, 
+                 indices,  
                  boxes_weight=None):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
         targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
         The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
         """
-        if "pred_rot" in outputs and "r" in targets[0].keys():
-            idx = self._get_src_permutation_idx(indices)
-            src_rot = outputs["pred_rot"][idx]
-            target_rot = torch.cat([t["r"][i] for t, (_, i) in zip(targets, indices)], dim=0)
-            losses = {}
-            loss_rot = self.mae_loss(src_rot.view(-1, 6), target_rot).sum() / num_boxes
-            losses["loss_rot"] = loss_rot
-            return losses
+        idx = self._get_src_permutation_idx(indices)
+        src_rot = outputs["pred_rotations"][idx]          # (N,6) or (N,3,3)
+        tgt_rot = torch.cat([t["relative_rotation"][i] for t, (_, i) in zip(targets, indices)], dim=0)  # (N,6) or (N,3,3)
+
+        # Convert to rotation matrices
+        if  src_rot.dim() == 3 and src_rot.shape[-2:] == (3,3):
+            R_pred = rotation_matrix_to_raw_6d(src_rot)         # (N,3,3)
+        elif src_rot.dim() == 2 and src_rot.size(-1) == 6:
+            R_pred = src_rot
         else:
-            return {}
+            raise ValueError(f"Unsupported pred_rotations shape {src_rot.shape}")
+
+        if tgt_rot.dim() == 3 and tgt_rot.shape[-2:] == (3,3):
+            R_tgt = rotation_matrix_to_raw_6d(tgt_rot)          # (N,3,3)
+        elif tgt_rot.dim() == 2 and tgt_rot.size(-1) == 6:
+            R_tgt = tgt_rot
+        else:
+            raise ValueError(f"Unsupported target_rot shape {tgt_rot.shape}")
+        
+        losses = {}
+        #loss_rot = self.mae_loss(src_rot.view(-1, 6), target_rot).sum() / num_boxes
+        loss_rot = F.l1_loss(R_pred.view(-1, 6), R_tgt.view(-1, 6), reduction='mean')
+        losses["loss_rot"] = loss_rot
+        return losses
+    #### End My ADD-S and Rot loss. TODO: Check if it differs from the YOLOX6d implementation
+    
     def kpts_loss(self, kpts_preds, kpts_targets, bbox_targets):
         sigmas = torch.tensor([.26], device=kpts_preds.device) / 10.0
         kpts_preds_x, kpts_targets_x = kpts_preds[:, 0:1], kpts_targets[:, 0:1]
@@ -415,6 +617,7 @@ class SetCriterion(nn.Module):
         oks = torch.exp(-d / (bbox_scale * (4 * sigmas**2) + 1e-9))
         lkpt = (1 - oks).mean(axis=1)
         return lkpt
+    
     def adds_loss_z(self, preds, targets, cls_targets):
         """
         Normalize the depth error with diameter of that object.
@@ -424,7 +627,12 @@ class SetCriterion(nn.Module):
         models_diameter = models_diameter[cls_targets]
         loss_trn_z = (self.mae_loss(preds, targets)*100 / models_diameter[:, None]).sum()/len(preds)
         return loss_trn_z
-    def adds_loss(self, pose_preds, pose_gt, cls_targets, shape_loss=False):
+    
+    def adds_loss(self, 
+                  pose_preds, 
+                  pose_gt, 
+                  cls_targets, 
+                  shape_loss=False):
         """
         Find out the actual ADD(S) score that can be used as a loss
         shape_loss: if set to True, don't use the translation component of the loss. This is called shape loss.
@@ -492,8 +700,78 @@ class SetCriterion(nn.Module):
 
     ######################################################
 
-    #####T6D Symmetric Aware loss ########################
+    #####T6D Direct: Symmetric Aware loss for rotation | translation uses the same as PoET ########################
     # TODO. We need to sample points from the meshes for this to work and need the symmetries.
+    def symmetric_aware_rot_loss_optimized(self,
+                                 R_pred, 
+                                 R_gt, 
+                                 points, 
+                                 symmetric_flags=None, 
+                                 reduction='mean',
+                                chunk_size=100):
+        """
+        Symmetry-aware rotation loss (Memory-optimized version)
+        
+        Improvements:
+        - Uses chunked computation for symmetric loss
+        - Numerical stability with epsilon
+        - Better documentation
+        - Optional use of torch.cdist for efficiency
+        """
+        if points.dim() == 2:
+            B = R_pred.shape[0]
+            points = points.unsqueeze(0).expand(B, -1, -1)
+        
+        # Transform points: X = P @ R^T
+        X_gt   = points @ R_gt.transpose(-1, -2)   # (B, N, 3)
+        X_pred = points @ R_pred.transpose(-1, -2) # (B, N, 3)
+        
+        B, N, _ = X_gt.shape
+        device = X_gt.device
+        
+        if symmetric_flags is None:
+            symmetric_flags = torch.zeros(B, dtype=torch.bool, device=device)
+        else:
+            symmetric_flags = torch.as_tensor(symmetric_flags, dtype=torch.bool, device=device)
+        
+        # Non-symmetric: mean ||R_gt x - R_pred x|| + epsilon for stability
+        nonsym_dist = torch.norm(X_gt - X_pred, dim=-1)
+        nonsym_dist = (nonsym_dist + 1e-8).mean(dim=-1)  # (B,)
+        
+        # Symmetric: Chunked computation to save memory
+        # mean_{x1} min_{x2} ||R_gt x1 - R_pred x2||
+        if symmetric_flags.any():
+            # Option 1: Using torch.cdist (faster if available)
+            # sym_dists = torch.cdist(X_gt, X_pred, p=2)  # (B, N, N)
+            # sym_min = sym_dists.min(dim=-1).values.mean(dim=-1)
+            
+            # Option 2: Chunked computation (memory-efficient)
+            sym_min_list = []
+            for i in range(0, N, chunk_size):
+                end_i = min(i + chunk_size, N)
+                chunk = X_gt[:, i:end_i, None, :]  # (B, chunk_size, 1, 3)
+                diffs = chunk - X_pred[:, None, :, :]  # (B, chunk_size, N, 3)
+                chunk_dists = torch.norm(diffs, dim=-1) + 1e-8  # (B, chunk_size, N)
+                chunk_min = chunk_dists.min(dim=-1).values  # (B, chunk_size)
+                sym_min_list.append(chunk_min)
+            
+            sym_min = torch.cat(sym_min_list, dim=1).mean(dim=-1)  # (B,)
+        else:
+            # If no symmetric objects, skip computation
+            sym_min = torch.zeros_like(nonsym_dist)
+        
+        # Select per instance
+        loss_per_inst = torch.where(symmetric_flags, sym_min, nonsym_dist)  # (B,)
+        
+        if reduction == 'mean':
+            return loss_per_inst.mean()
+        elif reduction == 'sum':
+            return loss_per_inst.sum()
+        elif reduction == 'none':
+            return loss_per_inst
+        else:
+            raise ValueError(f"Invalid reduction: {reduction}")
+    
     def symmetric_aware_rot_loss(self,
                                  R_pred, 
                                  R_gt, 
@@ -553,51 +831,195 @@ class SetCriterion(nn.Module):
         else:
             raise ValueError(f"Invalid reduction: {reduction}")
 
-    def symmetric_aware_rotation_loss_bidirectional(R_pred, 
+    def symmetric_aware_rotation_loss_bidirectional(
+                                                    R_pred, 
                                                     R_gt, 
                                                     points, 
                                                     symmetric_flags=None,     
                                                     reduction='mean',
                                                     bidirectional=True,
-                                                    squared=True):
+                                                    squared=True
+                                                ):
+        """
+        Rotation loss aware of object symmetry.
+        
+        Args:
+            R_pred: (B, 3, 3) predicted rotation matrices
+            R_gt: (B, 3, 3) ground truth rotation matrices
+            points: (N, 3) or (B, N, 3) reference points
+            symmetric_flags: (B,) bool tensor indicating symmetric objects
+            reduction: 'mean', 'sum', or 'none'
+            bidirectional: If True, use Chamfer distance for symmetric objects
+            squared: If True, use squared distances
+        
+        Returns:
+            Loss scalar (if reduction != 'none') or (B,) tensor
+        """
+        # Ensure points is (B, N, 3)
         if points.dim() == 2:
             B = R_pred.shape[0]
-            points = points.unsqueeze(0).expand(B, -1, -1)  # (B,N,3)
+            points = points.unsqueeze(0).expand(B, -1, -1)
         
-        X_gt   = points @ R_gt.transpose(-1, -2)    # (B,N,3)
-        X_pred = points @ R_pred.transpose(-1, -2)  # (B,N,3)
+        # Rotate points: (B, N, 3) @ (B, 3, 3) -> (B, N, 3)
+        X_gt = points @ R_gt.transpose(-1, -2)
+        X_pred = points @ R_pred.transpose(-1, -2)
+        
         B, N, _ = X_gt.shape
         device = X_gt.device
         
+        # Handle symmetric flags
         if symmetric_flags is None:
             symmetric_flags = torch.zeros(B, dtype=torch.bool, device=device)
         else:
             symmetric_flags = torch.as_tensor(symmetric_flags, dtype=torch.bool, device=device)
         
-        diff = X_gt - X_pred
-        d_point = torch.norm(diff, dim=-1)
+        # --- Non-symmetric loss (point-to-point) ---
+        diff = X_gt - X_pred  # (B, N, 3)
         if squared:
-            d_point = d_point.pow(2)
-        nonsym = d_point.mean(dim=-1)  # (B,)
-        # Pairwise distances
-        pdiffs = X_gt[:, :, None, :] - X_pred[:, None, :, :]  # (B,N,N,3)
-        pair_d = torch.norm(pdiffs, dim=-1)
-        if squared:
-            pair_d = pair_d.pow(2)
-        gt_to_pred = pair_d.min(dim=-1).values.mean(dim=-1)   # (B,)
-        if bidirectional:
-            pred_to_gt = pair_d.min(dim=-2).values.mean(dim=-1)
-            sym_loss = 0.5 * (gt_to_pred + pred_to_gt)
+            nonsym = (diff ** 2).sum(dim=-1).mean(dim=-1)  # (B,)
         else:
-            sym_loss = gt_to_pred
+            nonsym = diff.norm(dim=-1).mean(dim=-1)  # (B,)
+        
+        # --- Symmetric loss (Chamfer distance) ---
+        if symmetric_flags.any():
+            # Compute pairwise squared distances more efficiently
+            # ||a - b||^2 = ||a||^2 + ||b||^2 - 2 * a·b
+            X_gt_sq = (X_gt ** 2).sum(dim=-1, keepdim=True)      # (B, N, 1)
+            X_pred_sq = (X_pred ** 2).sum(dim=-1, keepdim=True)  # (B, N, 1)
+            
+            # (B, N, N)
+            pair_d_sq = (
+                X_gt_sq +                                    # (B, N, 1)
+                X_pred_sq.transpose(-1, -2) -                # (B, 1, N)
+                2 * torch.bmm(X_gt, X_pred.transpose(-1, -2)) # (B, N, N)
+            )
+            
+            # Clamp to avoid numerical issues with sqrt
+            pair_d_sq = pair_d_sq.clamp(min=0)
+            
+            if squared:
+                pair_d = pair_d_sq
+            else:
+                pair_d = pair_d_sq.sqrt()
+            
+            # GT → Pred: min over predicted points
+            gt_to_pred = pair_d.min(dim=-1).values.mean(dim=-1)  # (B,)
+            
+            if bidirectional:
+                # Pred → GT: min over GT points
+                pred_to_gt = pair_d.min(dim=-2).values.mean(dim=-1)  # (B,)
+                sym_loss = 0.5 * (gt_to_pred + pred_to_gt)
+            else:
+                sym_loss = gt_to_pred
+        else:
+            # No symmetric objects, create dummy tensor
+            sym_loss = torch.zeros(B, device=device)
+        
+        # --- Combine ---
         loss_per = torch.where(symmetric_flags, sym_loss, nonsym)
+        
         if reduction == 'mean':
             return loss_per.mean()
-        if reduction == 'sum':
+        elif reduction == 'sum':
             return loss_per.sum()
-        if reduction == 'none':
+        elif reduction == 'none':
             return loss_per
-        raise ValueError(f"Bad reduction {reduction}")
+        else:
+            raise ValueError(f"Invalid reduction: {reduction}")
+
+    def symmetric_aware_rotation_loss_bidirectional_optimized(
+        R_pred, 
+        R_gt, 
+        points, 
+        symmetric_flags=None,     
+        reduction='mean',
+        bidirectional=True,
+        squared=True
+    ):
+        """
+        Rotation loss aware of object symmetry.
+        
+        Args:
+            R_pred: (B, 3, 3) predicted rotation matrices
+            R_gt: (B, 3, 3) ground truth rotation matrices
+            points: (N, 3) or (B, N, 3) reference points
+            symmetric_flags: (B,) bool tensor indicating symmetric objects
+            reduction: 'mean', 'sum', or 'none'
+            bidirectional: If True, use bidirectional Chamfer distance for symmetric objects
+            squared: If True, use squared distances
+        
+        Returns:
+            Loss scalar (if reduction != 'none') or (B,) tensor
+        """
+        # Ensure points is (B, N, 3)
+        if points.dim() == 2:
+            B = R_pred.shape[0]
+            points = points.unsqueeze(0).expand(B, -1, -1)
+        
+        B, N, _ = points.shape
+        device = points.device
+        
+        # Rotate points: (B, N, 3) @ (B, 3, 3) -> (B, N, 3)
+        X_pred = points @ R_pred.transpose(-1, -2)
+        X_gt = points @ R_gt.transpose(-1, -2)
+        
+        # Handle symmetric flags
+        if symmetric_flags is None:
+            symmetric_flags = torch.zeros(B, dtype=torch.bool, device=device)
+        else:
+            symmetric_flags = symmetric_flags.to(device=device, dtype=torch.bool)
+        
+        has_symmetric = symmetric_flags.any()
+        has_nonsymmetric = (~symmetric_flags).any()
+        
+        # Initialize loss tensor
+        loss_per = torch.zeros(B, device=device)
+        
+        # --- Non-symmetric loss (point-to-point) ---
+        if has_nonsymmetric:
+            nonsym_mask = ~symmetric_flags
+            diff = X_gt[nonsym_mask] - X_pred[nonsym_mask]  # (B_ns, N, 3)
+            
+            if squared:
+                nonsym_loss = (diff ** 2).sum(dim=-1).mean(dim=-1)  # (B_ns,)
+            else:
+                nonsym_loss = diff.norm(dim=-1).mean(dim=-1)  # (B_ns,)
+            
+            loss_per[nonsym_mask] = nonsym_loss
+        
+        # --- Symmetric loss (Chamfer distance) ---
+        if has_symmetric:
+            sym_mask = symmetric_flags
+            X_pred_sym = X_pred[sym_mask]  # (B_s, N, 3)
+            X_gt_sym = X_gt[sym_mask]      # (B_s, N, 3)
+            
+            # Use torch.cdist for efficiency (handles sqrt internally)
+            if squared:
+                pair_d = torch.cdist(X_gt_sym, X_pred_sym, p=2).pow(2)  # (B_s, N, N)
+            else:
+                pair_d = torch.cdist(X_gt_sym, X_pred_sym, p=2)  # (B_s, N, N)
+            
+            # GT → Pred: min over predicted points
+            gt_to_pred = pair_d.min(dim=-1).values.mean(dim=-1)  # (B_s,)
+            
+            if bidirectional:
+                # Pred → GT: min over GT points
+                pred_to_gt = pair_d.min(dim=-2).values.mean(dim=-1)  # (B_s,)
+                sym_loss = 0.5 * (gt_to_pred + pred_to_gt)
+            else:
+                sym_loss = gt_to_pred
+            
+            loss_per[sym_mask] = sym_loss
+        
+        # --- Reduction ---
+        if reduction == 'mean':
+            return loss_per.mean()
+        elif reduction == 'sum':
+            return loss_per.sum()
+        elif reduction == 'none':
+            return loss_per
+        else:
+            raise ValueError(f"Invalid reduction: {reduction}")
 
     def loss_rotation_symmetric_aware(self, 
                                       outputs, 
@@ -677,7 +1099,7 @@ class SetCriterion(nn.Module):
         sym_flags = torch.cat(matched_sym_flags, dim=0)  # (TotalM,)
 
         # Compute per-instance symmetry-aware loss (returns scalar with reduction='mean')
-        loss_val = self.symmetric_aware_rot_loss(R_pred,
+        loss_val = self.symmetric_aware_rot_loss_optimized(R_pred,
                                                   R_gt,
                                                   points,
                                                   symmetric_flags=sym_flags)
@@ -689,7 +1111,8 @@ class SetCriterion(nn.Module):
 
         losses = {"loss_rot": loss_val}  # Already mean-reduced
         return losses
-    ############# T6D symmetric aware loss end ########################
+    ############# T6D symmetric aware loss end  ########################
+    
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
@@ -834,7 +1257,10 @@ class SetCriterion(nn.Module):
             'boxes': self.loss_boxes,
             'translation': self.loss_translation,
             #'rotation': self.loss_rotation_symmetric_aware,
-            'rotation': self.loss_rotation,
+            #'rotation': self.loss_rotation,
+            'rotation': self.loss_rot,
+            #'adds': self.loss_adds,
+            #'adds': self.loss_adds_mse, # From yolox6d
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)

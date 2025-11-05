@@ -282,7 +282,7 @@ class Matcher6D(nn.Module):
         Smaller eps → tighter range but higher risk of NaNs; 1e-6 is a typical choice.
         Returns:
             cost: (P, T) where cost[p,t] = angle(R_p, R_t)
-        angle = arccos( (trace(R_p * R_t^T) - 1) / 2 )
+        For two rotation matrices R₁ and R₂, the angle θ between them is: angle = arccos( (trace(R_p * R_t^T) - 1) / 2 ) 
         """
         # Expand for pairwise multiplication
         if pred_rotations.shape[-1] == 6:
@@ -304,6 +304,54 @@ class Matcher6D(nn.Module):
         cos_theta = cos_theta.clamp(-1.0 + eps, 1.0 - eps)
         angle = torch.acos(cos_theta)
         return angle
+    
+    # Surrogate preserves ordering (smaller cost ↔ closer rotations) without expensive acos.
+    def compute_rotation_cost_surrogate(self,
+                                        pred_rotations: torch.Tensor,
+                                        target_rotations: torch.Tensor,
+                                        eps: float = 1e-6,
+                                        use_geodesic: bool = False) -> torch.Tensor:
+        """
+        Rotation cost between all predicted and target rotations.
+
+        Inputs:
+            pred_rotations: (P,6) or (P,3,3)
+            target_rotations: (T,6) or (T,3,3)
+            eps: numerical clamp
+            use_geodesic: if True returns angular distance (radians),
+                          else returns surrogate cost (1 - cosθ) which is cheaper.
+
+        Returns:
+            cost: (P,T) rotation cost matrix
+        """
+        # Convert 6D to matrices if needed
+        if pred_rotations.shape[-1] == 6 and pred_rotations.dim() == 2:
+            R_pred = rotation_6d_simple_to_matrix(pred_rotations)      # (P,3,3)
+        else:
+            R_pred = pred_rotations
+        if target_rotations.shape[-1] == 6 and target_rotations.dim() == 2:
+            R_tgt = rotation_6d_simple_to_matrix(target_rotations)     # (T,3,3)
+        else:
+            R_tgt = target_rotations
+
+        # Broadcast
+        R_pred_exp = R_pred.unsqueeze(1)              # (P,1,3,3)
+        R_tgt_exp  = R_tgt.unsqueeze(0)               # (1,T,3,3)
+
+        # Relative rotation
+        R_rel = R_pred_exp @ R_tgt_exp.transpose(-1, -2)  # (P,T,3,3)
+
+        # Trace
+        trace = R_rel[..., 0, 0] + R_rel[..., 1, 1] + R_rel[..., 2, 2]
+        cos_theta = (trace - 1.0) * 0.5
+        cos_theta = cos_theta.clamp(-1.0 + eps, 1.0 - eps)
+
+        if use_geodesic:
+            angle = torch.acos(cos_theta)          # (P,T)
+            return angle
+        else:
+            # Monotonic surrogate (no acos) in [0,2]
+            return 1.0 - cos_theta                 # (P,T)
 
     # TODO: What works best for translation cost L1 or L2?
     def compute_translation_cost_l1(self, pred_translations, target_translations):
@@ -328,6 +376,9 @@ class Matcher6D(nn.Module):
     def compute_translation_z_cost(self, pred_z, target_z):
         raise NotImplementedError
     
+    
+    
+
     @torch.no_grad()
     def forward(self, outputs, targets, group_detr=1):
         """Performs the matching
