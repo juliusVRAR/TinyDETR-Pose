@@ -82,15 +82,15 @@ class LWDETR6D(nn.Module):
 
         self.bbox_reparam = bbox_reparam
         ################6D Heads##################
-                ############################################
+        
         # New: 6D pose estimation head
         self.rotation_mode = rotation_mode
         # Determine Translation and Rotation head output dimension
         self.t_dim = 3
+        self.xy_dim = 2
+        self.z_dim = 1
         if self.rotation_mode == '6d':
             self.rot_dim = 6 # GramSchmidt
-        elif self.rotation_mode in ['quat', 'silho_quat']:
-            self.rot_dim = 4
         else:
             raise NotImplementedError('Rotational representation is not supported.')
         
@@ -99,13 +99,21 @@ class LWDETR6D(nn.Module):
                                  output_dim=self.rot_dim, 
                                  num_layers=3)
         
+        # YOLOX6d approach: split translation into 2D center (xy) + depth (z)
         self.dec_trans_head = MLP(input_dim=hidden_dim, 
                                   hidden_dim=hidden_dim, 
-                                  output_dim=self.t_dim, 
-                                  num_layers=3)
-        # YOLOX6d Appraoch: split translation into 2D center (xy) + depth (z)
-        #self.dec_trans_xy_head = MLP(input_dim=hidden_dim, hidden_dim=hidden_dim, output_dim=2, num_layers=1)
-        #self.dec_trans_z_head = MLP(input_dim=hidden_dim, hidden_dim=hidden_dim, output_dim=1, num_layers=1)
+                                  output_dim=hidden_dim, 
+                                  num_layers=2)
+        
+        self.dec_trans_xy_head = MLP(input_dim=hidden_dim, 
+                                     hidden_dim=hidden_dim, 
+                                     output_dim=self.xy_dim, 
+                                     num_layers=1)
+        
+        self.dec_trans_z_head = MLP(input_dim=hidden_dim, 
+                                    hidden_dim=hidden_dim, 
+                                    output_dim=self.z_dim, 
+                                    num_layers=1)
         ############################################
 
         # init prior_prob setting for focal loss
@@ -129,6 +137,10 @@ class LWDETR6D(nn.Module):
                 [copy.deepcopy(self.dec_rot_head) for _ in range(group_detr)])
             self.transformer.enc_out_trans_embed = nn.ModuleList(
                 [copy.deepcopy(self.dec_trans_head) for _ in range(group_detr)])
+            self.transformer.enc_out_trans_xy_embed = nn.ModuleList(
+                [copy.deepcopy(self.dec_trans_xy_head) for _ in range(group_detr)])
+            self.transformer.enc_out_trans_z_embed = nn.ModuleList(
+                [copy.deepcopy(self.dec_trans_z_head) for _ in range(group_detr)])
 
         self._export = False
 
@@ -205,6 +217,10 @@ class LWDETR6D(nn.Module):
         # Gram-Schmidt representation
         output_rots = torch.cat([rot_c1, rot_c2], dim=3)
         output_trans = self.dec_trans_head(hs)
+        output_trans_xy = self.dec_trans_xy_head(output_trans)
+        output_trans_z = self.dec_trans_z_head(output_trans)
+        output_trans = torch.cat([output_trans_xy, output_trans_z], dim=3)
+
         # Postprocess output_rots for loss
         output_rots = self.process_rotation(output_rots)
         out = {'pred_logits': outputs_class[-1], 
@@ -226,17 +242,23 @@ class LWDETR6D(nn.Module):
             for g_idx in range(group_detr):
                 enc_feat = hs_enc_list[g_idx]
                 cls_enc_gidx = self.transformer.enc_out_class_embed[g_idx](enc_feat)
-                rot_enc_list.append(self.transformer.enc_out_rot_embed[g_idx](enc_feat))      # (B, num_queries, rot_dim)
-                trans_enc_list.append(self.transformer.enc_out_trans_embed[g_idx](enc_feat))  # (B, num_queries, 3)
                 cls_enc.append(cls_enc_gidx)
+                rot_enc_list.append(self.transformer.enc_out_rot_embed[g_idx](enc_feat))      # (B, num_queries, rot_dim)
+                #TODO: Is this correct? We predict trans and put these into xy and z heads separately
+                trans_enc = self.transformer.enc_out_trans_embed[g_idx](enc_feat)  # (B, num_queries, 3)
+                trans_enc_xy = self.transformer.enc_out_trans_xy_embed[g_idx](trans_enc)  # (B, num_queries, 2)
+                trans_enc_z = (self.transformer.enc_out_trans_z_embed[g_idx](trans_enc))  # (B, num_queries, 1)
+                trans_enc_list.append(torch.cat([trans_enc_xy, trans_enc_z], dim=-1))  # (B, num_queries, 3)
             cls_enc = torch.cat(cls_enc, dim=1)
             rot_enc = torch.cat(rot_enc_list, dim=1)            # (B, total_queries, rot_dim)
+            # TODO: How do we achive the same as in outputs above?
             trans_enc = torch.cat(trans_enc_list, dim=1)      # (B, total_queries, 3)
-
+            
+            # What axis are these ?
             rot_c1 = F.normalize(rot_enc[..., :3], dim=-1) 
             rot_c2 = F.normalize(rot_enc[..., 3:] - torch.sum(rot_c1 * rot_enc[..., :3], dim=-1, keepdim=True) * rot_c1, dim=-1) 
-            rot_enc_full = torch.cat([rot_c1, rot_c2], dim=-1)          # (B, total_queries, 9)
-            rot_enc_full = self.process_rotation(rot_enc_full)
+            rot_enc_full = torch.cat([rot_c1, rot_c2], dim=-1)          # (B, total_queries, 6)
+            rot_enc_full = self.process_rotation(rot_enc_full) # (B, total_queries, 3, 3)
             out['enc_outputs'] = {
                 'pred_logits': cls_enc,
                 'pred_boxes': ref_enc,
@@ -313,7 +335,8 @@ class SetCriterion(nn.Module):
                  sum_group_losses=False,
                  use_varifocal_loss=False,
                  use_position_supervised_loss=False,
-                 ia_bce_loss=False,):
+                 ia_bce_loss=False,
+                 ):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -337,14 +360,15 @@ class SetCriterion(nn.Module):
         # Needed for Yolox6d losses
         self.mae_loss = nn.L1Loss(reduction="none")
         self.shape_loss = False
+        self.warm_up_epochs = 5
 
     ###################PoET no CAD needed#########################
     # Pose losses
     def loss_translation(self, outputs, targets, indices, num_boxes=None):
         """
-        Compute the loss related to the translation of pose estimation, namely the mean square error (MSE).
+        Compute the loss related to the translation of pose estimation, namely the mean square error (MSE)/ L2 Loss.
         outputs must contain the key 'pred_translation', while targets must contain the key 'relative_position'
-        Position / Translation are expected in [x, y, z] meters
+        Position / Translation are expected in [x, y, z] meters 
         """
         idx = self._get_src_permutation_idx(indices)
         src_translation = outputs["pred_translations"][idx]
@@ -357,8 +381,9 @@ class SetCriterion(nn.Module):
         losses = {}
         losses["loss_trans"] = loss_translation.sum() / n_obj
         return losses
-    
-    def loss_rotation(self, 
+
+    # Not symmetry/geometric aware
+    def loss_rotation(self,
                       outputs,
                       targets, 
                       indices, 
@@ -398,20 +423,20 @@ class SetCriterion(nn.Module):
         ADD / ADD-S loss (mean normalized point distance).
         shape_loss: if True ignore translation (rotation-only shape alignment).
         outputs:
-            pred_rotation: (B,Q,3,3)
-            pred_translation: (B,Q,3)
+            pred_rotations: (B,Q,3,3)
+            pred_translations: (B,Q,3)
         targets per batch element:
-            relative_rotation or rotation: (N,3,3)
-            relative_position or translation: (N,3)
+            relative_rotations or rotations: (N,3,3)
+            relative_positions or translations: (N,3)
             model_points: (N,P,3)
             diameter: (N,)
             is_symmetric: (N,) bool
         indices: list of (pred_idx, tgt_idx)
         """
         # Accept both naming conventions in targets
-        device = outputs['pred_rotation'].device
-        pred_R = outputs['pred_rotation']
-        pred_t = outputs['pred_translation']
+        device = outputs['pred_rotations'].device
+        pred_R = outputs['pred_rotations']
+        pred_t = outputs['pred_translations']
 
         total_point_loss = 0.0
         total_instances = 0
@@ -464,7 +489,7 @@ class SetCriterion(nn.Module):
 
         # Key remains loss_adds (rotation-only if shape_loss True)
         return {'loss_adds': loss_adds}
-    
+    ### Is wrong version of ADD-S. ADD-S uses closest point distance, not squared distance
     def loss_adds_mse(self, 
                 outputs, 
                 targets, 
@@ -577,10 +602,8 @@ class SetCriterion(nn.Module):
                  targets, 
                  indices,  
                  boxes_weight=None):
-        """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
-        targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
-        The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
-        """
+        """Rotation loss from YOLO-6D Paper."""
+
         idx = self._get_src_permutation_idx(indices)
         src_rot = outputs["pred_rotations"][idx]          # (N,6) or (N,3,3)
         tgt_rot = torch.cat([t["relative_rotation"][i] for t, (_, i) in zip(targets, indices)], dim=0)  # (N,6) or (N,3,3)
@@ -618,6 +641,278 @@ class SetCriterion(nn.Module):
         lkpt = (1 - oks).mean(axis=1)
         return lkpt
     
+    def kpts_loss_paper_version(self, kpts_preds, kpts_targets, bbox_targets):
+        """OKS loss following YOLO-6D-Pose paper."""
+        k = 0.1  # Paper-Parameter (nicht 0.026!)
+        
+        # Squared distance
+        d_squared = ((kpts_preds[:, 0:1] - kpts_targets[:, 0:1]) ** 2 + 
+                    (kpts_preds[:, 1:2] - kpts_targets[:, 1:2]) ** 2)
+        
+        # Bounding box area
+        bbox_area = torch.prod(bbox_targets[:, -2:], dim=1, keepdim=True)
+        
+        # OKS: exp(-d²/(2*bbox_area*k²))
+        oks = torch.exp(-d_squared / (2 * bbox_area * k**2 + 1e-9))
+        
+        lkpt = (1 - oks).mean(axis=1)
+        return lkpt
+
+    def loss_oks(self, outputs, targets, indices, num_boxes=None):
+        device = outputs['pred_translations'].device
+        pred_translations = outputs['pred_translations']
+        
+        k = 0.1
+        k_squared = k ** 2
+        
+        total_loss = 0.0
+        num_valid = 0
+        
+        for b, (pred_idx, tgt_idx) in enumerate(indices):
+            if len(pred_idx) == 0:
+                continue
+            
+            t_pred = pred_translations[b][pred_idx]  # (M, 3)
+            tgt = targets[b]
+            t_gt = tgt['relative_position'][tgt_idx]  # (M, 3)
+            
+            # ✅ KRITISCH: Projiziere 3D → 2D Pixel-Koordinaten
+            K = {
+                "cx": 312.9869,
+                "cy": 241.3109,
+                "depth_scale": 0.1,
+                "fx": 1066.778,
+                "fy": 1067.487,
+                "height": 480,
+                "width": 640
+                }
+            if K is None:
+                raise ValueError("Camera intrinsics 'K' required for OKS loss")
+            
+            # Projektion: [u, v, 1]^T = K @ [tx, ty, tz]^T
+            # u = fx * tx/tz + cx
+            # v = fy * ty/tz + cy
+            fx, fy = K["fx"], K["fy"]
+            cx, cy = K["cx"], K["cy"]
+
+            # Predicted 2D keypoints (Pixel)
+            u_pred = fx * (t_pred[:, 0] / t_pred[:, 2]) + cx
+            v_pred = fy * (t_pred[:, 1] / t_pred[:, 2]) + cy
+            xy_pred = torch.stack([u_pred, v_pred], dim=-1)  # (M, 2)
+            
+            # Ground truth 2D keypoints (Pixel)
+            u_gt = fx * (t_gt[:, 0] / t_gt[:, 2]) + cx
+            v_gt = fy * (t_gt[:, 1] / t_gt[:, 2]) + cy
+            xy_gt = torch.stack([u_gt, v_gt], dim=-1)  # (M, 2)
+            
+            # ✅ Jetzt sind beide in PIXELN
+            d_squared = torch.sum((xy_pred - xy_gt) ** 2, dim=-1)  # (M,)
+            
+            # Bounding box scale (Pixel)
+            if 'boxes' in tgt:
+                # ⚠️ Prüfe Format: cxcywh oder xyxy?
+                boxes = tgt['boxes'][tgt_idx]
+                if boxes.shape[-1] == 4:
+                    # Wenn cxcywh → konvertiere zu xyxy
+                    boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes)
+                else:
+                    boxes_xyxy = boxes
+                    
+                width = boxes_xyxy[:, 2] - boxes_xyxy[:, 0]
+                height = boxes_xyxy[:, 3] - boxes_xyxy[:, 1]
+                area = width * height
+                s_b_squared = torch.clamp(area, min=1e-6)  # (M,)
+            else:
+                # Fallback: nutze Objektgröße aus Tiefe
+                s_b_squared = (torch.abs(t_gt[:, 2]) * 100) ** 2  # Heuristik
+            
+            # OKS Loss
+            exponent = -d_squared / (2 * s_b_squared * k_squared)
+            oks = torch.exp(torch.clamp(exponent, min=-10, max=0))  # Stabilität
+            loss_oks = 1.0 - oks
+            
+            total_loss += loss_oks.mean()
+            num_valid += 1
+        
+        if num_valid == 0:
+            loss = torch.zeros((), device=device, requires_grad=True)
+        else:
+            loss = total_loss / num_valid
+        
+        return {'loss_oks_trans_xy': loss}
+
+    def loss_oks_old(self, 
+                outputs, 
+                targets, 
+                indices,
+                num_boxes=None):
+        """
+        Object Keypoint Similarity (OKS) loss for tx, ty components.
+        
+        From YOLO-6D-Pose paper (Equation 21):
+        "Since our proposed network predicts the projection of [tx, ty] on the image, 
+        we add a loss term to make the 2D prediction accurate. This task is similar 
+        to predicting a keypoint per object. Hence, we use a simplified version of 
+        Object Keypoint Similarity (OKS) loss."
+        
+        L_OKS = 1 - OKS = 1 - exp(-d²/(2*s_b²*k²))
+        
+        where:
+
+            - d: Euclidean distance between GT and predicted projection of 3D centroid
+            - s_b: square root of bounding box area (object scale)
+
+            - k: keypoint-specific constant (empirically set to 0.1)
+        
+        Args:
+            outputs: dict containing:
+
+                - 'pred_translation': (B, Q, 3) predicted translations
+                - Optional: 'pred_boxes': (B, Q, 4) for box area, else computed from targets
+
+            targets: list of B dicts, each containing:
+
+                - 'relative_position': (N, 3) ground truth translations
+                - 'boxes': (N, 4) bounding boxes in [x1, y1, x2, y2] format (optional)
+
+                - Optional: camera intrinsics for projection
+
+            indices: list of B tuples (pred_idx, tgt_idx) matching predictions to targets
+            num_boxes: optional, not used but kept for interface compatibility
+        
+        Returns:
+            dict with key 'loss_oks': scalar loss value
+        """
+        device = outputs['pred_translations'].device
+        pred_translations = outputs['pred_translations']  # (B, Q, 3)
+
+        # Keypoint-specific constant (from paper)
+        k = 0.1
+        k_squared = k ** 2
+        
+        total_loss = 0.0
+        num_valid = 0
+        
+        for b, (pred_idx, tgt_idx) in enumerate(indices):
+            if len(pred_idx) == 0:
+                continue
+            
+            # Extract matched predictions and ground truth
+            t_pred = pred_translations[b][pred_idx]       # (M, 3)
+            tgt = targets[b]
+            t_gt = tgt['relative_position'][tgt_idx]      # (M, 3)
+            
+            # Extract tx, ty components (projected 2D position of 3D centroid)
+            # In camera coordinates: cx = tx, cy = ty (before applying K)
+            # For simplicity, we work directly with tx, ty
+            txy_pred = t_pred[:, :2]  # (M, 2) - [tx, ty]
+            txy_gt = t_gt[:, :2]      # (M, 2) - [tx, ty]
+            
+            # Compute Euclidean distance d
+            d = torch.norm(txy_pred - txy_gt, dim=-1)  # (M,)
+            d_squared = d ** 2
+            
+            # Compute scale s_b (square root of bounding box area)
+            if 'boxes' in tgt:
+                # boxes format: [x1, y1, x2, y2]
+                boxes =  box_ops.box_cxcywh_to_xyxy(tgt['boxes'][tgt_idx]) # (M, 4)
+                width = boxes[:, 2] - boxes[:, 0]
+                height = boxes[:, 3] - boxes[:, 1]
+                area = width * height
+                s_b = torch.sqrt(torch.clamp(area, min=1e-6))  # (M,)
+            
+            
+            s_b_squared = s_b ** 2
+            
+            # Compute OKS: exp(-d²/(2*s_b²*k²))
+            exponent = -d_squared / (2 * s_b_squared * k_squared)
+            oks = torch.exp(exponent)  # (M,)
+            
+            # Loss: L_OKS = 1 - OKS
+            loss_oks = 1.0 - oks  # (M,)
+            
+            # Accumulate mean loss for this batch element
+            total_loss += loss_oks.mean()
+            num_valid += 1
+        
+        # Average over all batch elements with valid matches
+        if num_valid == 0:
+            loss = torch.zeros((), device=device, requires_grad=True)
+        else:
+            loss = total_loss / num_valid
+        
+        return {'loss_oks_trans_xy': loss}
+    
+    def loss_ard(self, 
+                outputs, 
+                targets, 
+                indices,
+                    num_boxes=None):
+        """
+        Absolute Relative Difference (ARD) loss for tz component.
+        
+        From YOLO-6D-Pose paper:
+        "For the tz component of the loss, we use Absolute relative difference (ARD) 
+        as an additional loss component in line with depth learning frameworks."
+        
+        ARD = |1 - t_zp / t_zg| = |t_zp - t_zg| / |t_zg|
+        
+        This loss measures the relative error of depth prediction, making it 
+        scale-invariant (objects at different depths are treated equally).
+        
+        Args:
+            outputs: dict containing:
+
+                - 'pred_translation': (B, Q, 3) predicted translations
+
+            targets: list of B dicts, each containing:
+
+                - 'relative_position': (N, 3) ground truth translations
+
+            indices: list of B tuples (pred_idx, tgt_idx) matching predictions to targets
+            num_boxes: optional, not used but kept for interface compatibility
+        
+        Returns:
+            dict with key 'loss_ard': scalar loss value
+        """
+        device = outputs['pred_translations'].device
+        pred_translations = outputs['pred_translations']  # (B, Q, 3)
+
+        total_loss = 0.0
+        num_valid = 0
+        
+        for b, (pred_idx, tgt_idx) in enumerate(indices):
+            if len(pred_idx) == 0:
+                continue
+            
+            # Extract matched predictions and ground truth
+            t_pred = pred_translations[b][pred_idx]       # (M, 3)
+            tgt = targets[b]
+            t_gt = tgt['relative_position'][tgt_idx]      # (M, 3)
+            
+            # Extract tz component (depth, z-axis: index 2)
+            tz_pred = t_pred[:, 2]  # (M,)
+            tz_gt = t_gt[:, 2]      # (M,)
+            
+            # Clamp ground truth to avoid division by zero
+            # Use absolute value since depth should be positive
+            tz_gt_safe = torch.clamp(torch.abs(tz_gt), min=1e-6)
+            
+            # Compute ARD: |1 - pred/gt| = |pred - gt| / gt
+            ard = torch.abs(1.0 - tz_pred / tz_gt_safe)  # (M,)
+            
+            # Accumulate mean loss for this batch element
+            total_loss += ard.mean()
+            num_valid += 1
+        
+        # Average over all batch elements with valid matches
+        if num_valid == 0:
+            loss = torch.zeros((), device=device, requires_grad=True)
+        else:
+            loss = total_loss / num_valid
+
+        return {'loss_ard_trans_z': loss}
+
     def adds_loss_z(self, preds, targets, cls_targets):
         """
         Normalize the depth error with diameter of that object.
@@ -667,41 +962,95 @@ class SetCriterion(nn.Module):
                 loss_adds = torch.hstack((loss_adds, adds_0p1))
         loss_adds = loss_adds.mean()
         return loss_adds
+    
     def loss_trans(self, outputs, targets, indices, num_boxes, boxes_weight=None):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
         targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
         The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
         """
-        if "pred_trans_xy" in outputs and "xy" in targets[0].keys():
-            idx = self._get_src_permutation_idx(indices)
-            src_boxes = outputs["pred_boxes"][idx]
-            src_trans_xy = outputs["pred_trans_xy"][idx]
-            src_trans_z = outputs["pred_trans_z"][idx]
-            src_rot = outputs["pred_rot"][idx]
-            target_boxes = torch.cat([t["boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0)
-            target_trans_xy = torch.cat([t["xy"][i] for t, (_, i) in zip(targets, indices)], dim=0)
-            target_trans_z = torch.cat([t["z"][i] for t, (_, i) in zip(targets, indices)], dim=0)
-            target_rot = torch.cat([t["r"][i] for t, (_, i) in zip(targets, indices)], dim=0)
-            loss_trn_xy = self.kpts_loss(src_trans_xy.view(-1, 2), target_trans_xy, target_boxes)
-            cls_targets = torch.cat([t["labels"][i] for t, (_, i) in zip(targets, indices)], dim=0)
-            loss_trn_z  = self.adds_loss_z(src_trans_z, target_trans_z.unsqueeze(1), cls_targets)
-            pose_targets = torch.cat([target_trans_xy, target_trans_z.unsqueeze(1), target_rot], 1)
-            pose_preds = torch.cat([src_trans_xy, src_trans_z, src_rot], 1)
-            loss_adds = self.adds_loss(
-                pose_preds, pose_targets,
-                cls_targets,
-                shape_loss = True
-                )
-            losses = {}
-            losses["loss_trans"] = loss_trn_xy.sum() / num_boxes + loss_trn_z + loss_adds
-            return losses
-        else:
-            return {}
+        loss_trn_xy = self.loss_oks(outputs, targets, indices, num_boxes=num_boxes)['loss_oks_trans_xy']
+        loss_trn_z = self.loss_ard(outputs, targets, indices, num_boxes=num_boxes)['loss_ard_trans_z'] 
+        losses = {}
+        lambda_xy = 1.0
+        lambda_z = 1.0
+        losses['loss_trans_xy'] = loss_trn_xy.sum() / num_boxes
+        losses['loss_trans_z'] = loss_trn_z.sum() / num_boxes
+        losses["loss_trans"] = lambda_xy * loss_trn_xy + lambda_z * loss_trn_z
+        return losses
+
+    def loss_pose(self, 
+              outputs, 
+              targets, 
+              indices,
+              num_boxes=None):
+        """
+        Complete pose loss from YOLO-6D-Pose paper (Equation 23):
+        
+        L_pose = λ_ADD(S) * L_ADD(S) + λ_rot * L_rot + λ_OKS * L_OKS + λ_ARD * L_ARD
+        
+        Args:
+            outputs: dict containing:
+
+                - 'pred_rotation': (B, Q, 3, 3) predicted rotation matrices
+                - 'pred_translation': (B, Q, 3) predicted translations
+
+            targets: list of B dicts, each containing:
+
+                - 'relative_rotation': (N, 3, 3) ground truth rotations
+                - 'relative_position': (N, 3) ground truth translations
+
+                - 'model_points': (N, P, 3) 3D model points
+                - 'diameter': (N,) object diameters
+
+                - 'is_symmetric': (N,) boolean flags for symmetric objects
+                - 'boxes': (N, 4) bounding boxes [x1, y1, x2, y2]
+
+            indices: list of B tuples (pred_idx, tgt_idx) for matching
+            num_boxes: optional, for interface compatibility
+        
+        Returns:
+            dict with individual and total pose losses
+        """
+        device = outputs['pred_rotations'].device
+        
+        # Loss weights from paper (empirically tuned)
+        lambda_adds = 1.0
+        lambda_rot = 1.0
+        lambda_oks = 0.1
+        lambda_ard = 0.1
+        
+        # Compute individual losses
+        loss_adds_dict = self.loss_adds(outputs, targets, indices)
+        loss_rot_dict = self.loss_rot(outputs, targets, indices)
+        loss_oks_dict = self.loss_oks_old(outputs, targets, indices)
+        loss_ard_dict = self.loss_ard(outputs, targets, indices)
+        
+        # Extract loss values
+        loss_adds = loss_adds_dict['loss_adds']
+        loss_rot = loss_rot_dict['loss_rot']
+        loss_oks = loss_oks_dict['loss_oks_trans_xy']
+        loss_ard = loss_ard_dict['loss_ard_trans_z']
+        
+        # Total weighted pose loss
+        loss_pose_total = (
+            lambda_adds * loss_adds +
+            lambda_rot * loss_rot +
+            lambda_oks * loss_oks +
+            lambda_ard * loss_ard
+        )
+        
+        # Return all components for logging
+        return {
+            'loss_pose': loss_pose_total,
+            'loss_rot': loss_rot,
+            'loss_oks_trans_xy': loss_oks,
+            'loss_ard_trans_z': loss_ard,
+            'loss_adds': loss_adds
+        }
 
     ######################################################
 
     #####T6D Direct: Symmetric Aware loss for rotation | translation uses the same as PoET ########################
-    # TODO. We need to sample points from the meshes for this to work and need the symmetries.
     def symmetric_aware_rot_loss_optimized(self,
                                  R_pred, 
                                  R_gt, 
@@ -1112,7 +1461,8 @@ class SetCriterion(nn.Module):
         losses = {"loss_rot": loss_val}  # Already mean-reduced
         return losses
     ############# T6D symmetric aware loss end  ########################
-    
+     
+
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (Binary focal loss)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
@@ -1255,10 +1605,10 @@ class SetCriterion(nn.Module):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
-            'translation': self.loss_translation,
-            #'rotation': self.loss_rotation_symmetric_aware,
+            #'translation': self.loss_translation,
+            'pose': self.loss_pose,
             #'rotation': self.loss_rotation,
-            'rotation': self.loss_rot,
+            #'rotation': self.loss_rot,
             #'adds': self.loss_adds,
             #'adds': self.loss_adds_mse, # From yolox6d
         }
@@ -1467,13 +1817,8 @@ def build(args):
     weight_dict['loss_giou'] = args.giou_loss_coef
 
     if args.rotation_representation == '6d':
-        losses = ['translation', 'rotation']
-    elif args.rotation_representation == 'quat':
-        raise NotImplementedError('Rotation representation not implemented')
-        losses = ['translation', 'quaternion']
-    elif args.rotation_representation == 'silho_quat':
-        raise NotImplementedError('Rotation representation not implemented')
-        losses = ['translation', 'silho_quaternion']
+        #losses = ['translation', 'rotation']
+        losses = ['pose']
     else:
         raise NotImplementedError('Rotation representation not implemented')
 
@@ -1502,7 +1847,8 @@ def build(args):
                              sum_group_losses=sum_group_losses,
                              use_varifocal_loss = args.use_varifocal_loss,
                              use_position_supervised_loss=args.use_position_supervised_loss,
-                             ia_bce_loss=args.ia_bce_loss)
+                             ia_bce_loss=args.ia_bce_loss,
+                             )
     criterion.to(device)
     postprocessors = {'bbox': PostProcess(num_select=args.num_select)}
 

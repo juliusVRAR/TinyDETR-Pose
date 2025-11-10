@@ -462,8 +462,8 @@ def main(args):
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
             # extra checkpoint before LR drop and every `checkpoint_interval` epochs
-            #if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.checkpoint_interval == 0:
-            checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}_new.pth')
+            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.checkpoint_interval == 0:
+                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}_new.pth')
             for checkpoint_path in checkpoint_paths:
                 weights = {
                     'model': model_without_ddp.state_dict(),
@@ -481,6 +481,10 @@ def main(args):
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_loader_val, base_ds, device, args=args
         )
+        if args.resume:
+            eval_epoch = checkpoint['epoch']
+        else:
+            eval_epoch = None
         pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
                       args.rotation_representation, device, args.output_dir, eval_epoch)
         
@@ -515,6 +519,10 @@ def main(args):
             ema_test_stats, _ = evaluate(
                 ema_m.module, criterion, postprocessors, data_loader_val, base_ds, device, args=args
             )
+        if args.resume:
+            eval_epoch = checkpoint['epoch']
+        else:
+            eval_epoch = None
             pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
                       args.rotation_representation, device, args.output_dir, eval_epoch)
             log_stats.update({f'ema_test_{k}': v for k,v in ema_test_stats.items()})
