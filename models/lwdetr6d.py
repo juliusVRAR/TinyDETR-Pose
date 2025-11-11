@@ -742,10 +742,10 @@ class SetCriterion(nn.Module):
         return {'loss_oks_trans_xy': loss}
 
     def loss_oks_old(self, 
-                outputs, 
-                targets, 
-                indices,
-                num_boxes=None):
+                    outputs, 
+                    targets, 
+                    indices,
+                    num_boxes=None):
         """
         Object Keypoint Similarity (OKS) loss for tx, ty components.
         
@@ -819,7 +819,8 @@ class SetCriterion(nn.Module):
                 width = boxes[:, 2] - boxes[:, 0]
                 height = boxes[:, 3] - boxes[:, 1]
                 area = width * height
-                s_b = torch.sqrt(torch.clamp(area, min=1e-6))  # (M,)
+                #s_b = torch.sqrt(torch.clamp(area, min=1e-6))  # (M,)
+                s_b = area
             
             
             s_b_squared = s_b ** 2
