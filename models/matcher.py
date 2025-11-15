@@ -367,14 +367,35 @@ class Matcher6D(nn.Module):
         # pred_translations: (P,3), target_translations: (T,3)
         # Returns: (P,T) matrix of Euclidean distances
         return torch.cdist(pred_translations, target_translations, p=2)
-   
-    #TODO: YOLOX6d approach for translation cost
-    def compute_translation_xy_cost(self, pred_xy, target_xy):
-        
-        raise NotImplementedError
     
-    def compute_translation_z_cost(self, pred_z, target_z):
-        raise NotImplementedError
+    #TODO: YOLOX6d approach for translation cost. We split yx and z of the tranlation vector
+    def compute_translation_xy_cost(self, pred_xy, target_xy):
+        """
+        pred_xy: [num_queries, 2] - predicted xy translations
+        target_xy: [num_targets, 2] - ground truth xy translations
+    
+        Returns: cost matrix [num_queries, num_targets]
+        """
+        # L1 distance 
+        cost_xy = torch.cdist(pred_xy, target_xy, p=1)  # Manhattan distance
+    
+        # Alternative: L2 distance
+        # cost_xy = torch.cdist(pred_xy, target_xy, p=2)  # Euclidean distance
+        return cost_xy
+    
+    def compute_translation_z_cost(self, pred_z, target_z, epsilon=1e-6):
+        """
+        pred_z: [num_queries, 1]
+        target_z: [num_targets, 1]
+        """
+        # Relative L1 cost
+        pred_z = pred_z.unsqueeze(1)      # [num_queries, 1, 1]
+        target_z = target_z.unsqueeze(0)   # [1, num_targets, 1]
+        
+        # Relative error: |pred - target| / target
+        cost_z = torch.abs(pred_z - target_z) / (torch.abs(target_z) + epsilon)
+        
+        return cost_z.squeeze(-1)  # [num_queries, num_targets]
     
     
     
@@ -436,7 +457,7 @@ class Matcher6D(nn.Module):
 
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
-        # TODO: Test if this performs better
+        # TODO: Test if this performs better this is what poet does
         # Compute L1 cost between box centers
         # cost_bbox = torch.cdist(out_bbox[:, 0:2], tgt_bbox[:, 0:2], p=1)
         # Compute the giou cost betwen boxes
@@ -450,15 +471,22 @@ class Matcher6D(nn.Module):
             #cost_rotation = self.compute_rotation_cost(pred_rotations=out_rotation, 
             #                                               target_rotations=tgt_rotation)
             # From T6D paper
-            # Not implemented yet
             cost_rotation = self.compute_rotation_cost_angular(pred_rotations=out_rotation,
                                                                     target_rotations=tgt_rotation)
             # Compute translation cost (l1)
-            cost_translation = self.compute_translation_cost_l1(out_translation, 
-                                                                tgt_translation)
+            #cost_translation = self.compute_translation_cost_l1(out_translation, 
+            #                                                   tgt_translation)
             # Compute translation cost (l2) T6D does this
-            cost_translation_l2 = self.compute_translation_cost_l2(out_translation, 
-                                                                tgt_translation)
+            #cost_translation_l2 = self.compute_translation_cost_l2(out_translation, 
+            #                                                    tgt_translation)
+            cost_trans_xy = self.compute_translation_xy_cost(out_translation[:, :2],
+                                                            tgt_translation[:, :2])
+            #cost_trans_z = self.compute_translation_z_cost(out_translation[:, 2:3],
+            #                                              tgt_translation[:, 2:3])
+            lambda_xy = 1.0
+            lambda_z = 1.0
+            cost_translation = (lambda_xy * cost_trans_xy) #+ (lambda_z * cost_trans_z)
+
             # Add to total cost
             C += self.cost_rotation * cost_rotation + self.cost_translation * cost_translation
 

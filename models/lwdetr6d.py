@@ -597,6 +597,7 @@ class SetCriterion(nn.Module):
         # TODO: Rename this to loss_adds
         return {'loss_rot': loss}
     
+    
     def loss_rot(self, 
                  outputs, 
                  targets, 
@@ -630,7 +631,10 @@ class SetCriterion(nn.Module):
         return losses
     #### End My ADD-S and Rot loss. TODO: Check if it differs from the YOLOX6d implementation
     
-    def kpts_loss(self, kpts_preds, kpts_targets, bbox_targets):
+    def kpts_loss(self, 
+                  kpts_preds, 
+                  kpts_targets, 
+                  bbox_targets):
         sigmas = torch.tensor([.26], device=kpts_preds.device) / 10.0
         kpts_preds_x, kpts_targets_x = kpts_preds[:, 0:1], kpts_targets[:, 0:1]
         kpts_preds_y, kpts_targets_y = kpts_preds[:, 1:2], kpts_targets[:, 1:2]
@@ -638,23 +642,6 @@ class SetCriterion(nn.Module):
         d = (kpts_preds_x - kpts_targets_x) ** 2 + (kpts_preds_y - kpts_targets_y) ** 2
         bbox_scale = torch.prod(bbox_targets[:, -2:], dim=1, keepdim=True)  #scale derived from bbox gt
         oks = torch.exp(-d / (bbox_scale * (4 * sigmas**2) + 1e-9))
-        lkpt = (1 - oks).mean(axis=1)
-        return lkpt
-    
-    def kpts_loss_paper_version(self, kpts_preds, kpts_targets, bbox_targets):
-        """OKS loss following YOLO-6D-Pose paper."""
-        k = 0.1  # Paper-Parameter (nicht 0.026!)
-        
-        # Squared distance
-        d_squared = ((kpts_preds[:, 0:1] - kpts_targets[:, 0:1]) ** 2 + 
-                    (kpts_preds[:, 1:2] - kpts_targets[:, 1:2]) ** 2)
-        
-        # Bounding box area
-        bbox_area = torch.prod(bbox_targets[:, -2:], dim=1, keepdim=True)
-        
-        # OKS: exp(-d²/(2*bbox_area*k²))
-        oks = torch.exp(-d_squared / (2 * bbox_area * k**2 + 1e-9))
-        
         lkpt = (1 - oks).mean(axis=1)
         return lkpt
 
@@ -740,7 +727,112 @@ class SetCriterion(nn.Module):
             loss = total_loss / num_valid
         
         return {'loss_oks_trans_xy': loss}
+    
+    def loss_oks_yolo6d(self, 
+                    outputs, 
+                    targets, 
+                    indices,
+                    num_boxes=None):
+        """
+        Object Keypoint Similarity (OKS) loss for tx, ty components.
+        
+        From YOLO-6D-Pose paper (Equation 21):
+        "Since our proposed network predicts the projection of [tx, ty] on the image, 
+        we add a loss term to make the 2D prediction accurate. This task is similar 
+        to predicting a keypoint per object. Hence, we use a simplified version of 
+        Object Keypoint Similarity (OKS) loss."
+        
+        L_OKS = 1 - OKS = 1 - exp(-d²/(2*s_b²*k²))
+        
+        where:
 
+            - d: Euclidean distance between GT and predicted projection of 3D centroid
+            - s_b: square root of bounding box area (object scale)
+
+            - k: keypoint-specific constant (empirically set to 0.1)
+        
+        Args:
+            outputs: dict containing:
+
+                - 'pred_translation': (B, Q, 3) predicted translations
+                - Optional: 'pred_boxes': (B, Q, 4) for box area, else computed from targets
+
+            targets: list of B dicts, each containing:
+
+                - 'relative_position': (N, 3) ground truth translations
+                - 'boxes': (N, 4) bounding boxes in [x1, y1, x2, y2] format (optional)
+
+                - Optional: camera intrinsics for projection
+
+            indices: list of B tuples (pred_idx, tgt_idx) matching predictions to targets
+            num_boxes: optional, not used but kept for interface compatibility
+        
+        Returns:
+            dict with key 'loss_oks': scalar loss value
+        """
+        device = outputs['pred_translations'].device
+        pred_translations = outputs['pred_translations']  # (B, Q, 3)
+        sigmas = torch.tensor([.26], device=device) / 10.0
+        # Keypoint-specific constant (from paper)
+        k = 0.1
+        k_squared = k ** 2
+        
+        total_loss = 0.0
+        num_valid = 0
+        
+        for b, (pred_idx, tgt_idx) in enumerate(indices):
+            if len(pred_idx) == 0:
+                continue
+            
+            # Extract matched predictions and ground truth
+            t_pred = pred_translations[b][pred_idx]       # (M, 3)
+            tgt = targets[b]
+            t_gt = tgt['relative_position'][tgt_idx]      # (M, 3)
+            
+            # Extract tx, ty components (projected 2D position of 3D centroid)
+            # In camera coordinates: cx = tx, cy = ty (before applying K)
+            # For simplicity, we work directly with tx, ty
+            tx_pred = t_pred[:, 0:1]  # (M, 1) - [tx]
+            ty_pred = t_pred[:, 1:2]  # (M, 1) - [ty]
+            tx_gt = t_gt[:, 0:1]      # (M, 1) - [tx]
+            ty_gt = t_gt[:, 1:2]      # (M, 1) - [ty]
+            
+            # Compute Euclidean distance d
+            d = (tx_pred - tx_gt) ** 2 + (ty_pred - ty_gt) ** 2
+            d_squared = d
+            
+            # Compute scale s_b (square root of bounding box area)
+            if 'boxes' in tgt:
+                # boxes format: [x1, y1, x2, y2]
+                boxes =  box_ops.box_cxcywh_to_xyxy(tgt['boxes'][tgt_idx]) # (M, 4)
+                #boxes = tgt['boxes'][tgt_idx]
+                width = boxes[:, 2] - boxes[:, 0]
+                height = boxes[:, 3] - boxes[:, 1]
+                area = width * height
+                #s_b = torch.sqrt(torch.clamp(area, min=1e-6))  # (M,)
+                s_b = area
+            
+            
+            s_b_squared = s_b ** 2
+            
+            # Compute OKS: exp(-d²/(2*s_b²*k²))
+            exponent = -d_squared / (2 * s_b_squared * k_squared)
+            oks = torch.exp(-d / (s_b * (4 * sigmas**2) + 1e-9))  # (M,)
+            
+            # Loss: L_OKS = 1 - OKS
+            loss_oks = 1.0 - oks  # (M,)
+            
+            # Accumulate mean loss for this batch element
+            total_loss += loss_oks.mean()
+            num_valid += 1
+        
+        # Average over all batch elements with valid matches
+        if num_valid == 0:
+            loss = torch.zeros((), device=device, requires_grad=True)
+        else:
+            loss = total_loss / num_valid
+        
+        return {'loss_oks_trans_xy': loss}
     def loss_oks_old(self, 
                     outputs, 
                     targets, 
@@ -848,7 +940,7 @@ class SetCriterion(nn.Module):
                 outputs, 
                 targets, 
                 indices,
-                    num_boxes=None):
+                num_boxes=None):
         """
         Absolute Relative Difference (ARD) loss for tz component.
         
@@ -914,6 +1006,50 @@ class SetCriterion(nn.Module):
 
         return {'loss_ard_trans_z': loss}
 
+    # Adapted adds_z/translation z loss from yolo6d code to DETR structure.
+    def loss_adds_z(self, 
+                   outputs, 
+                   targets, 
+                   indices, 
+                   num_boxes=None):
+        """
+        Depth (tz) ADD-style normalized loss.
+        Original adds_loss_z logic adapted to DETR:
+            |pred_z - gt_z| * 100 / diameter(object)
+        Uses matched predictions only.
+        Returns:
+            {'loss_add_z': scalar}
+        """
+        assert 'pred_translations' in outputs, "Missing pred_translations in outputs"
+        device = outputs['pred_translations'].device
+
+        batch_idx, src_idx = self._get_src_permutation_idx(indices)
+        if len(src_idx) == 0:
+            return {'loss_add_z': torch.zeros((), device=device, requires_grad=True)}
+
+        # Matched predicted translations
+        pred_t = outputs['pred_translations'][batch_idx, src_idx]  # (N,3)
+        pred_z = pred_t[:, 2]                                      # (N,)
+
+        # Gather matched gt z and diameters
+        gt_z_list = []
+        diam_list = []
+        for t, (_, tgt_idx) in zip(targets, indices):
+            if len(tgt_idx) == 0:
+                continue
+            gt_z_list.append(t['relative_position'][tgt_idx][:, 2])  # (Mi,)
+            if 'diameter' in t:
+                diam_list.append(t['diameter'][tgt_idx])             # (Mi,)
+            else:
+                diam_list.append(torch.ones(len(tgt_idx), device=device))
+
+        gt_z = torch.cat(gt_z_list, dim=0)          # (N,)
+        diam = torch.cat(diam_list, dim=0)          # (N,)
+        diam_safe = torch.clamp(diam, min=1e-6)
+        loss_add_z = (self.mae_loss(pred_z, gt_z)*100 / diam_safe).sum()/len(outputs['pred_translations'])
+
+        return {'loss_ard_trans_z': loss_add_z}
+    
     def adds_loss_z(self, preds, targets, cls_targets):
         """
         Normalize the depth error with diameter of that object.
@@ -924,6 +1060,32 @@ class SetCriterion(nn.Module):
         loss_trn_z = (self.mae_loss(preds, targets)*100 / models_diameter[:, None]).sum()/len(preds)
         return loss_trn_z
     
+    def loss_trans_z(self, 
+                    outputs, 
+                    targets, 
+                    indices,  
+                    num_boxes=None):
+        
+        batch_idx, src_idx = self._get_src_permutation_idx(indices)
+        if len(src_idx) == 0:
+            device = outputs['pred_translations'].device
+            return {'loss_trans_z': torch.zeros((), device=device, requires_grad=True)}
+
+        # Matched predicted tz
+        pred_z = outputs['pred_translations'][batch_idx, src_idx][:, 2].unsqueeze(1)  # (N,1)
+
+        # Matched gt tz
+        gt_z = torch.cat([
+            t['relative_position'][tgt_idx][:, 2].unsqueeze(1)
+            for t, (_, tgt_idx) in zip(targets, indices) if len(tgt_idx) > 0
+        ], dim=0)  # (N,1)
+
+        raw_loss = self.mae_loss(pred_z, gt_z).sum()
+        denom = num_boxes if (num_boxes is not None and num_boxes > 0) else pred_z.shape[0]
+        loss_trn_z = raw_loss / denom
+        
+        return {'loss_ard_trans_z': loss_trn_z}
+    # Adapted adds_z loss from yolo6d code to DETR structure.
     def adds_loss(self, 
                   pose_preds, 
                   pose_gt, 
@@ -1023,8 +1185,8 @@ class SetCriterion(nn.Module):
         # Compute individual losses
         loss_adds_dict = self.loss_adds(outputs, targets, indices)
         loss_rot_dict = self.loss_rot(outputs, targets, indices)
-        loss_oks_dict = self.loss_oks_old(outputs, targets, indices)
-        loss_ard_dict = self.loss_ard(outputs, targets, indices)
+        loss_oks_dict = self.loss_oks_yolo6d(outputs, targets, indices)
+        loss_ard_dict = self.loss_trans_z(outputs, targets, indices)
         
         # Extract loss values
         loss_adds = loss_adds_dict['loss_adds']
