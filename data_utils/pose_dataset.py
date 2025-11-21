@@ -54,6 +54,41 @@ def load_json(path: str | Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
+def draw_object_centers(img_input, centers_xy, radius=4, color=(0, 255, 0)):
+    """
+    Draw circles for object centers.
+    Accepts:
+      - torch.Tensor (C,H,W) in [0,1]
+      - PIL.Image
+      - np.ndarray (H,W,C) uint8 RGB or BGR
+    centers_xy: (N,2) pixel coords (u,v)
+    Returns BGR uint8 ndarray.
+    """
+    if centers_xy is None or len(centers_xy) == 0:
+        # Just convert and return
+        if isinstance(img_input, torch.Tensor):
+            img = (img_input.permute(1,2,0).numpy().clip(0,1) * 255).astype(np.uint8)
+        elif isinstance(img_input, Image.Image):
+            img = np.array(img_input)
+        else:
+            img = img_input
+        return img[..., ::-1].copy()  # BGR
+    # Normalize input to RGB uint8
+    if isinstance(img_input, torch.Tensor):
+        img = (img_input.permute(1,2,0).numpy().clip(0,1) * 255).astype(np.uint8)
+    elif isinstance(img_input, Image.Image):
+        img = np.array(img_input)
+    else:
+        img = img_input
+    # If grayscale expand
+    if img.ndim == 2:
+        img = np.repeat(img[:, :, None], 3, axis=2)
+    # Assume current img is RGB; convert to BGR for OpenCV drawing
+    img_bgr = img[..., ::-1].copy()
+    for (u, v) in centers_xy.tolist():
+        cv2.circle(img_bgr, (int(round(u)), int(round(v))), radius, color, -1, lineType=cv2.LINE_AA)
+    return img_bgr
+
 class PoseDataset(CocoDetection):
     """
     Pose Estimation Dataset. Returns samples consisting of images and the target containing the class, bounding box and
@@ -101,7 +136,7 @@ class PoseDataset(CocoDetection):
                                             local_size=local_size, 
                                             )
         self._transforms = transforms
-        self.prepare = ProcessPoseData(return_masks)
+        self.prepare = ProcessPoseData(return_masks, camera)
         self.jitter = jitter
         self.jitter_probability = jitter_probability
         self.std = std
@@ -298,8 +333,9 @@ class ProcessPoseData(object):
     """
     Processes the annotation file and brings it in the right format for the pose estimation task.
     """
-    def __init__(self, return_masks=False):
+    def __init__(self, return_masks=False, camera=None):
         self.return_masks = return_masks
+        self.camera = camera
 
     def __call__(self, image, target):
         w, h = image.size
@@ -393,6 +429,27 @@ class ProcessPoseData(object):
             intrinsics = [obj['intrinsics'] for obj in anno]
             intrinsics = torch.as_tensor(intrinsics, dtype=torch.float32)
 
+
+        # ------------------------------------------------------------------
+        # Compute 2D projected object centers (pixel)
+        # rel_position: (N,3) in camera coordinates (X,Y,Z)
+        # u = fx * X/Z + cx, v = fy * Y/Z + cy
+        # ------------------------------------------------------------------
+        object_center_2d = None
+        if rel_position is not None:
+            fx = self.camera['fx']; fy = self.camera['fy']
+            cx = self.camera['cx']; cy = self.camera['cy']
+            X = rel_position[:, 0] * 1000.0
+            Y = rel_position[:, 1] * 1000.0
+            Z = rel_position[:, 2].clamp(min=1e-6) * 1000.0
+            u = fx * (X / Z) + cx
+            v = fy * (Y / Z) + cy
+            object_center_2d = torch.stack([u, v], dim=1)  # pixels
+
+        centers_img = draw_object_centers(image, object_center_2d)
+        cv2.imwrite(str(Path(DEBUG_OUT, "object_centers.png")), centers_img)
+        # ------------------------------------------------------------------
+
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
         boxes = boxes[keep]
         classes = classes[keep]
@@ -414,6 +471,9 @@ class ProcessPoseData(object):
             rel_gs_rotation = rel_gs_rotation[keep] 
         if intrinsics is not None:
             intrinsics = intrinsics[keep]
+        if object_center_2d is not None:
+            object_center_2d = object_center_2d[keep]
+           
 
         target = {}
         target["boxes"] = boxes
@@ -441,6 +501,8 @@ class ProcessPoseData(object):
             target["relative_rotation_gs"] = rel_gs_rotation
         if intrinsics is not None:
             target["intrinsics"] = intrinsics
+        if object_center_2d is not None:
+            target["object_center_2d"] = object_center_2d              # pixels
 
         # for conversion to coco api
         area = torch.tensor([obj["area"] for obj in anno])
@@ -669,11 +731,7 @@ class MosaicDetection(PoseDataset):
                         fy_adj = base_cam["fy"] * scale
                         cx_adj = base_cam["cx"] * scale + padw
                         cy_adj = base_cam["cy"] * scale + padh
-                        # Takes the intrinsics of every scene camera.
-                        # fx_adj = base_cam["fx"]   
-                        # fy_adj = base_cam["fy"]
-                        # cx_adj = base_cam["cx"] 
-                        # cy_adj = base_cam["cy"]
+                        
                         intrinsics_adj = torch.tensor([fx_adj, fy_adj, cx_adj, cy_adj], 
                                                       dtype=torch.float32)
                         intrinsics_adj = intrinsics_adj.unsqueeze(0).repeat(relative_position.shape[0], 1) 

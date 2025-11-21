@@ -379,7 +379,7 @@ class SetCriterion(nn.Module):
         loss_translation = torch.sum(loss_translation, dim=1)
         loss_translation = torch.sqrt(loss_translation)
         losses = {}
-        losses["loss_trans"] = loss_translation.sum() / n_obj
+        losses["loss_translation"] = loss_translation.sum() / n_obj
         return losses
 
     # Not symmetry/geometric aware
@@ -602,7 +602,7 @@ class SetCriterion(nn.Module):
                  outputs, 
                  targets, 
                  indices,  
-                 boxes_weight=None):
+                 num_boxes):
         """Rotation loss from YOLO-6D Paper."""
 
         idx = self._get_src_permutation_idx(indices)
@@ -611,23 +611,23 @@ class SetCriterion(nn.Module):
 
         # Convert to rotation matrices
         if  src_rot.dim() == 3 and src_rot.shape[-2:] == (3,3):
-            R_pred = rotation_matrix_to_raw_6d(src_rot)         # (N,3,3)
+            R_pred = rotation_matrix_to_raw_6d(src_rot)         # (N,6)
         elif src_rot.dim() == 2 and src_rot.size(-1) == 6:
             R_pred = src_rot
         else:
             raise ValueError(f"Unsupported pred_rotations shape {src_rot.shape}")
 
         if tgt_rot.dim() == 3 and tgt_rot.shape[-2:] == (3,3):
-            R_tgt = rotation_matrix_to_raw_6d(tgt_rot)          # (N,3,3)
+            R_tgt = rotation_matrix_to_raw_6d(tgt_rot)          # (N,6)
         elif tgt_rot.dim() == 2 and tgt_rot.size(-1) == 6:
             R_tgt = tgt_rot
         else:
             raise ValueError(f"Unsupported target_rot shape {tgt_rot.shape}")
         
         losses = {}
-        #loss_rot = self.mae_loss(src_rot.view(-1, 6), target_rot).sum() / num_boxes
-        loss_rot = F.l1_loss(R_pred.view(-1, 6), R_tgt.view(-1, 6), reduction='mean')
-        losses["loss_rot"] = loss_rot
+        loss_rot = self.mae_loss(R_pred.view(-1, 6), R_tgt.view(-1, 6)).sum() / num_boxes
+        #loss_rot = F.l1_loss(R_pred.view(-1, 6), R_tgt.view(-1, 6), reduction='mean')
+        losses["loss_rot"] = loss_rot / 6.0
         return losses
     #### End My ADD-S and Rot loss. TODO: Check if it differs from the YOLOX6d implementation
     
@@ -645,89 +645,227 @@ class SetCriterion(nn.Module):
         lkpt = (1 - oks).mean(axis=1)
         return lkpt
 
+    def loss_oks_vibed(self, outputs, targets, indices, num_boxes):
+        
+        device = outputs['pred_translations'].device 
+        
+        sigmas = torch.tensor([.26], device=device) / 10.0
+        k = 2*sigmas
+        EPSILON = torch.finfo(torch.float32).eps
+        
+        total = 0.0
+        count = 0
+
+        # Camera intrinsics (assumed pixels)
+        K = {
+            "cx": 312.9869,
+            "cy": 241.3109,
+            "depth_scale": 0.1,
+            "fx": 1066.778,
+            "fy": 1067.487,
+            "height": 480,
+            "width": 640
+        }
+        fx = K['fx']; fy = K['fy']; cx = K['cx']; cy = K['cy']
+        W = torch.as_tensor(K['width'], device=device, dtype=torch.float32)
+        H = torch.as_tensor(K['height'], device=device, dtype=torch.float32)
+        WH = torch.stack([W, H])  # (2,)
+
+        for b, (pred_idx, tgt_idx) in enumerate(indices):
+            if len(pred_idx) == 0:
+                continue
+
+            # (M,3) translation in camera coords 
+            pred_t = outputs['pred_translations'][b][pred_idx]  
+            object_center_gt_norm = targets[b]['object_center_2d'][tgt_idx]  # (M,2) normalized
+            # Preds mm to m ?
+            X = pred_t[:, 0] * 1000.0
+            Y = pred_t[:, 1] * 1000.0
+            Z = pred_t[:, 2] * 1000.0
+            # Project to pixel space
+            u = fx * (X / Z) + cx
+            v = fy * (Y / Z) + cy
+            object_center_pred_px = torch.stack([u, v], dim=1)  # (M,2) pixels
+
+            # GT to pixel space 
+            object_center_gt_px = object_center_gt_norm * WH  # (M,2)
+
+            kpts_preds_x, kpts_targets_x = object_center_pred_px[:, 0:1], object_center_gt_px[:, 0:1]
+            kpts_preds_y, kpts_targets_y = object_center_pred_px[:, 1:2], object_center_gt_px[:, 1:2]
+            # OKS based loss
+            #dist_sq = (kpts_preds_x - kpts_targets_x) ** 2 + (kpts_preds_y - kpts_targets_y) ** 2
+            dist_sq = (kpts_targets_x - kpts_preds_x) ** 2 + (kpts_targets_y - kpts_preds_y) ** 2
+            # Box area in pixels
+            boxes = targets[b]['boxes'][tgt_idx]  # (M,4) cx,cy,w,h normalized
+            w_pix = boxes[:, 2] * W
+            h_pix = boxes[:, 3] * H
+            area_pix = (w_pix * h_pix)  #area in pixels
+
+            # OKS: exp(-d² / (2 * s_b² * k²))
+            denominator = 2*(k**2)* (area_pix + EPSILON)        
+            exponent = dist_sq / denominator
+            oks = torch.exp(-exponent)
+
+            loss_vec = 1.0 - oks
+            total += loss_vec.mean()
+            count += 1
+
+        if count == 0:
+            loss = torch.zeros((), device=device, requires_grad=True)
+        else:
+            loss = total / count
+
+        return {'loss_oks_trans_xy': loss}
+
     def loss_oks(self, outputs, targets, indices, num_boxes=None):
-        device = outputs['pred_translations'].device
-        pred_translations = outputs['pred_translations']
+        
+        device = outputs['pred_translations'].device 
         
         k = 0.1
         k_squared = k ** 2
         
-        total_loss = 0.0
-        num_valid = 0
-        
+        total = 0.0
+        count = 0
+
+        # Project 3D → 2D Pixel-coordinates using camera intrinsics
+        K = {
+            "cx": 312.9869,
+            "cy": 241.3109,
+            "depth_scale": 0.1,
+            "fx": 1066.778,
+            "fy": 1067.487,
+            "height": 480,
+            "width": 640
+            }
+        if K is None:
+            raise ValueError("Camera intrinsics 'K' required for OKS loss")
+        fx = K['fx']
+        fy = K['fy']
+        cx = K['cx']
+        cy = K['cy']
+        # Image size
+        W = torch.as_tensor(K['width'], device=device, dtype=torch.float32)
+        H = torch.as_tensor(K['height'], device=device, dtype=torch.float32)
+        WH = torch.tensor([W, H], dtype=torch.float32).to(device=device)
         for b, (pred_idx, tgt_idx) in enumerate(indices):
             if len(pred_idx) == 0:
                 continue
-            
-            t_pred = pred_translations[b][pred_idx]  # (M, 3)
-            tgt = targets[b]
-            t_gt = tgt['relative_position'][tgt_idx]  # (M, 3)
-            
-            # ✅ KRITISCH: Projiziere 3D → 2D Pixel-Koordinaten
-            K = {
-                "cx": 312.9869,
-                "cy": 241.3109,
-                "depth_scale": 0.1,
-                "fx": 1066.778,
-                "fy": 1067.487,
-                "height": 480,
-                "width": 640
-                }
-            if K is None:
-                raise ValueError("Camera intrinsics 'K' required for OKS loss")
-            
-            # Projektion: [u, v, 1]^T = K @ [tx, ty, tz]^T
-            # u = fx * tx/tz + cx
-            # v = fy * ty/tz + cy
-            fx, fy = K["fx"], K["fy"]
-            cx, cy = K["cx"], K["cy"]
 
-            # Predicted 2D keypoints (Pixel)
-            u_pred = fx * (t_pred[:, 0] / t_pred[:, 2]) + cx
-            v_pred = fy * (t_pred[:, 1] / t_pred[:, 2]) + cy
-            xy_pred = torch.stack([u_pred, v_pred], dim=-1)  # (M, 2)
-            
-            # Ground truth 2D keypoints (Pixel)
-            u_gt = fx * (t_gt[:, 0] / t_gt[:, 2]) + cx
-            v_gt = fy * (t_gt[:, 1] / t_gt[:, 2]) + cy
-            xy_gt = torch.stack([u_gt, v_gt], dim=-1)  # (M, 2)
-            
-            # ✅ Jetzt sind beide in PIXELN
-            d_squared = torch.sum((xy_pred - xy_gt) ** 2, dim=-1)  # (M,)
-            
-            # Bounding box scale (Pixel)
-            if 'boxes' in tgt:
-                # ⚠️ Prüfe Format: cxcywh oder xyxy?
-                boxes = tgt['boxes'][tgt_idx]
-                if boxes.shape[-1] == 4:
-                    # Wenn cxcywh → konvertiere zu xyxy
-                    boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes)
-                else:
-                    boxes_xyxy = boxes
-                    
-                width = boxes_xyxy[:, 2] - boxes_xyxy[:, 0]
-                height = boxes_xyxy[:, 3] - boxes_xyxy[:, 1]
-                area = width * height
-                s_b_squared = torch.clamp(area, min=1e-6)  # (M,)
-            else:
-                # Fallback: nutze Objektgröße aus Tiefe
-                s_b_squared = (torch.abs(t_gt[:, 2]) * 100) ** 2  # Heuristik
-            
-            # OKS Loss
-            exponent = -d_squared / (2 * s_b_squared * k_squared)
-            oks = torch.exp(torch.clamp(exponent, min=-10, max=0))  # Stabilität
-            loss_oks = 1.0 - oks
-            
-            total_loss += loss_oks.mean()
-            num_valid += 1
-        
-        if num_valid == 0:
+            pred_t = outputs['pred_translations'][b][pred_idx]  # (M,3) preds are in camera coords and mm
+            object_center_gt = targets[b]['object_center_2d'][tgt_idx]  # (M,2) object centers normalized just as boxes
+
+            X = pred_t[:, 0] * 1000.0
+            Y = pred_t[:, 1] * 1000.0
+            Z = pred_t[:, 2] * 1000.0
+            u = fx * (X / Z) + cx
+            v = fy * (Y / Z) + cy
+            object_center_pred = torch.stack([u, v], dim=1)  # (M,2) in pixel space
+            # Normalized pixel-space 
+            object_center_pred = object_center_pred / WH
+
+            kpts_preds_x, kpts_targets_x = object_center_pred[:, 0:1], object_center_gt[:, 0:1]
+            kpts_preds_y, kpts_targets_y = object_center_pred[:, 1:2], object_center_gt[:, 1:2]
+            # OKS based loss
+            d2 = (kpts_preds_x - kpts_targets_x) ** 2 + (kpts_preds_y - kpts_targets_y) ** 2
+
+            #d2 = (object_center_pred - gt_centers_px).pow(2).sum(dim=-1)  # (M,)
+
+            # Box area in pixels
+            boxes = targets[b]['boxes'][tgt_idx]               # (M,4) cx,cy,w,h normalized
+            area = boxes[:, 2] * boxes[:, 3]                   # (M,)
+                                   
+            area = area.clamp(min=1e-3)                     # avoid too tiny denominators
+            s_b2 = area ** 2              
+            exponent = d2 / (2.0 * s_b2 * k_squared)  # small epsilon for numerical stability
+            oks = torch.exp(-(exponent))
+            loss_vec = 1.0 - oks
+            total += loss_vec.mean()
+            count += 1
+
+            # Optional debug (comment out in production)
+            # if b == 0:
+            #     print(f"[OKS] d_mean={d2.sqrt().mean():.2f}px area_mean={area_pix.mean():.1f} exp_min={exponent.min():.1f} exp_max={exponent.max():.1f}")
+
+        if count == 0:
             loss = torch.zeros((), device=device, requires_grad=True)
         else:
-            loss = total_loss / num_valid
-        
+            loss = total / count
+
         return {'loss_oks_trans_xy': loss}
     
+    def loss_oks_2(self, outputs, targets, indices, num_boxes=None):
+        
+        device = outputs['pred_translations'].device 
+        sigmas = torch.tensor([.26], device=device) / 10.0
+        k = 2*sigmas
+        EPSILON = torch.finfo(torch.float32).eps
+        
+        total = 0.0
+        count = 0
+
+        # Project 3D → 2D Pixel-coordinates using camera intrinsics
+        K = {
+            "cx": 312.9869,
+            "cy": 241.3109,
+            "depth_scale": 0.1,
+            "fx": 1066.778,
+            "fy": 1067.487,
+            "height": 480,
+            "width": 640
+            }
+        if K is None:
+            raise ValueError("Camera intrinsics 'K' required for OKS loss")
+        fx = K['fx']
+        fy = K['fy']
+        cx = K['cx']
+        cy = K['cy']
+        # Image size
+        W = torch.as_tensor(K['width'], device=device, dtype=torch.float32)
+        H = torch.as_tensor(K['height'], device=device, dtype=torch.float32)
+        WH = torch.tensor([W, H], dtype=torch.float32).to(device=device)
+        for b, (pred_idx, tgt_idx) in enumerate(indices):
+            if len(pred_idx) == 0:
+                continue
+
+            pred_t = outputs['pred_translations'][b][pred_idx]  # (M,3) preds are in camera coords and mm
+            object_center_gt = targets[b]['object_center_2d'][tgt_idx]  # (M,2) object centers normalized just as boxes
+
+            X = pred_t[:, 0] * 1000.0
+            Y = pred_t[:, 1] * 1000.0
+            Z = pred_t[:, 2] * 1000.0
+            u = fx * (X / Z) + cx
+            v = fy * (Y / Z) + cy
+            object_center_pred = torch.stack([u, v], dim=1)  # (M,2) in pixel space
+            # Normalized pixel-space just as bboxes
+            object_center_pred = object_center_pred / WH
+
+            kpts_preds_x, kpts_targets_x = object_center_pred[:, 0:1], object_center_gt[:, 0:1]
+            kpts_preds_y, kpts_targets_y = object_center_pred[:, 1:2], object_center_gt[:, 1:2]
+            # OKS based loss
+            dist_sq = (kpts_preds_x - kpts_targets_x) ** 2 + (kpts_preds_y - kpts_targets_y) ** 2
+
+            # Box area in pixels
+            boxes = targets[b]['boxes'][tgt_idx]               # (M,4) cx,cy,w,h normalized
+            area = boxes[:, 2] * boxes[:, 3]                   # (M,)
+
+            denominator = 2*(k**2)* (area + EPSILON)        
+            exponent = dist_sq / denominator 
+            
+            oks = torch.exp(-(exponent))
+            loss_vec = 1.0 - oks
+            total += loss_vec.mean()
+            count += 1
+
+            # Optional debug (comment out in production)
+            # if b == 0:
+            #     print(f"[OKS] d_mean={d2.sqrt().mean():.2f}px area_mean={area_pix.mean():.1f} exp_min={exponent.min():.1f} exp_max={exponent.max():.1f}")
+
+        if count == 0:
+            loss = torch.zeros((), device=device, requires_grad=True)
+        else:
+            loss = total / count
+
+        return {'loss_oks_trans_xy': loss}
     def loss_oks_yolo6d(self, 
                     outputs, 
                     targets, 
@@ -771,9 +909,8 @@ class SetCriterion(nn.Module):
             dict with key 'loss_oks': scalar loss value
         """
         device = outputs['pred_translations'].device
-        pred_translations = outputs['pred_translations']  # (B, Q, 3)
-        sigmas = torch.tensor([.26], device=device) / 10.0
-        # Keypoint-specific constant (from paper)
+        
+        # Keypoint-specific weight constant
         k = 0.1
         k_squared = k ** 2
         
@@ -785,45 +922,35 @@ class SetCriterion(nn.Module):
                 continue
             
             # Extract matched predictions and ground truth
-            t_pred = pred_translations[b][pred_idx]       # (M, 3)
-            tgt = targets[b]
-            t_gt = tgt['relative_position'][tgt_idx]      # (M, 3)
-            
-            # Extract tx, ty components (projected 2D position of 3D centroid)
-            # In camera coordinates: cx = tx, cy = ty (before applying K)
-            # For simplicity, we work directly with tx, ty
-            tx_pred = t_pred[:, 0:1]  # (M, 1) - [tx]
-            ty_pred = t_pred[:, 1:2]  # (M, 1) - [ty]
-            tx_gt = t_gt[:, 0:1]      # (M, 1) - [tx]
-            ty_gt = t_gt[:, 1:2]      # (M, 1) - [ty]
+            t_pred_xy = outputs['pred_translations'][b][pred_idx][:, :2]       # (M, 2)
+            t_gt_xy = targets[b]['object_center_2d'][tgt_idx][:, :2]
             
             # Compute Euclidean distance d
-            d = (tx_pred - tx_gt) ** 2 + (ty_pred - ty_gt) ** 2
-            d_squared = d
             
-            # Compute scale s_b (square root of bounding box area)
-            if 'boxes' in tgt:
-                # boxes format: [x1, y1, x2, y2]
-                boxes =  box_ops.box_cxcywh_to_xyxy(tgt['boxes'][tgt_idx]) # (M, 4)
-                #boxes = tgt['boxes'][tgt_idx]
-                width = boxes[:, 2] - boxes[:, 0]
-                height = boxes[:, 3] - boxes[:, 1]
-                area = width * height
-                #s_b = torch.sqrt(torch.clamp(area, min=1e-6))  # (M,)
-                s_b = area
+            # d² per matched pair
+            d2 = (t_pred_xy - t_gt_xy).pow(2).sum(dim=-1)
+            # Boxes are in format cxcywh
+            # Boxes (cx,cy,w,h) normalized -> convert to pixels if image size known
+            boxes = targets[b]['boxes'][tgt_idx]
             
-            
-            s_b_squared = s_b ** 2
-            
+            # Box areas (normalized)
+            boxes = targets[b]['boxes'][tgt_idx]  # (M,4) cx,cy,w,h normalized
+            w = boxes[:, 2]
+            h = boxes[:, 3]
+            area = (w * h)
+
+           
+            s_b_squared  = torch.clamp(area, min=1e-6).pow(2)
+
             # Compute OKS: exp(-d²/(2*s_b²*k²))
-            exponent = -d_squared / (2 * s_b_squared * k_squared)
-            oks = torch.exp(-d / (s_b * (4 * sigmas**2) + 1e-9))  # (M,)
-            
+            # Prepare exponent
+            denominator = (2 * s_b_squared * k_squared)
+            exponent = (-(d2) / denominator + 1e-9 ) # small epsilon for numerical stability
+
+            oks = torch.exp(exponent)
             # Loss: L_OKS = 1 - OKS
-            loss_oks = 1.0 - oks  # (M,)
-            
-            # Accumulate mean loss for this batch element
-            total_loss += loss_oks.mean()
+            loss = 1.0 - oks                        # (M,)
+            total_loss += loss.mean()
             num_valid += 1
         
         # Average over all batch elements with valid matches
@@ -831,178 +958,24 @@ class SetCriterion(nn.Module):
             loss = torch.zeros((), device=device, requires_grad=True)
         else:
             loss = total_loss / num_valid
-        
+        #print(f"d_mean={d2.sqrt().mean():.3f} area_mean={area.mean():.3f} exp_min={exponent.min():.2f} exp_max={exponent.max():.2f}")
         return {'loss_oks_trans_xy': loss}
-    def loss_oks_old(self, 
+    
+    def loss_ard_mine(self, 
                     outputs, 
                     targets, 
                     indices,
-                    num_boxes=None):
-        """
-        Object Keypoint Similarity (OKS) loss for tx, ty components.
-        
-        From YOLO-6D-Pose paper (Equation 21):
-        "Since our proposed network predicts the projection of [tx, ty] on the image, 
-        we add a loss term to make the 2D prediction accurate. This task is similar 
-        to predicting a keypoint per object. Hence, we use a simplified version of 
-        Object Keypoint Similarity (OKS) loss."
-        
-        L_OKS = 1 - OKS = 1 - exp(-d²/(2*s_b²*k²))
-        
-        where:
+                    num_boxes):
+        eps=1e-8
+        idx = self._get_src_permutation_idx(indices)
+        pred_trans_z = outputs['pred_translations'][idx][:,-1]  # (N, 1)
+        tgt_trans_z = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:,-1] # (N, 1)
 
-            - d: Euclidean distance between GT and predicted projection of 3D centroid
-            - s_b: square root of bounding box area (object scale)
-
-            - k: keypoint-specific constant (empirically set to 0.1)
+        ard = torch.abs(tgt_trans_z - pred_trans_z)
+        ard = ard / (tgt_trans_z + eps)
+        loss_ard = ard
         
-        Args:
-            outputs: dict containing:
-
-                - 'pred_translation': (B, Q, 3) predicted translations
-                - Optional: 'pred_boxes': (B, Q, 4) for box area, else computed from targets
-
-            targets: list of B dicts, each containing:
-
-                - 'relative_position': (N, 3) ground truth translations
-                - 'boxes': (N, 4) bounding boxes in [x1, y1, x2, y2] format (optional)
-
-                - Optional: camera intrinsics for projection
-
-            indices: list of B tuples (pred_idx, tgt_idx) matching predictions to targets
-            num_boxes: optional, not used but kept for interface compatibility
-        
-        Returns:
-            dict with key 'loss_oks': scalar loss value
-        """
-        device = outputs['pred_translations'].device
-        pred_translations = outputs['pred_translations']  # (B, Q, 3)
-
-        # Keypoint-specific constant (from paper)
-        k = 0.1
-        k_squared = k ** 2
-        
-        total_loss = 0.0
-        num_valid = 0
-        
-        for b, (pred_idx, tgt_idx) in enumerate(indices):
-            if len(pred_idx) == 0:
-                continue
-            
-            # Extract matched predictions and ground truth
-            t_pred = pred_translations[b][pred_idx]       # (M, 3)
-            tgt = targets[b]
-            t_gt = tgt['relative_position'][tgt_idx]      # (M, 3)
-            
-            # Extract tx, ty components (projected 2D position of 3D centroid)
-            # In camera coordinates: cx = tx, cy = ty (before applying K)
-            # For simplicity, we work directly with tx, ty
-            txy_pred = t_pred[:, :2]  # (M, 2) - [tx, ty]
-            txy_gt = t_gt[:, :2]      # (M, 2) - [tx, ty]
-            
-            # Compute Euclidean distance d
-            d = torch.norm(txy_pred - txy_gt, dim=-1)  # (M,)
-            d_squared = d ** 2
-            
-            # Compute scale s_b (square root of bounding box area)
-            if 'boxes' in tgt:
-                # boxes format: [x1, y1, x2, y2]
-                boxes =  box_ops.box_cxcywh_to_xyxy(tgt['boxes'][tgt_idx]) # (M, 4)
-                width = boxes[:, 2] - boxes[:, 0]
-                height = boxes[:, 3] - boxes[:, 1]
-                area = width * height
-                #s_b = torch.sqrt(torch.clamp(area, min=1e-6))  # (M,)
-                s_b = area
-            
-            
-            s_b_squared = s_b ** 2
-            
-            # Compute OKS: exp(-d²/(2*s_b²*k²))
-            exponent = -d_squared / (2 * s_b_squared * k_squared)
-            oks = torch.exp(exponent)  # (M,)
-            
-            # Loss: L_OKS = 1 - OKS
-            loss_oks = 1.0 - oks  # (M,)
-            
-            # Accumulate mean loss for this batch element
-            total_loss += loss_oks.mean()
-            num_valid += 1
-        
-        # Average over all batch elements with valid matches
-        if num_valid == 0:
-            loss = torch.zeros((), device=device, requires_grad=True)
-        else:
-            loss = total_loss / num_valid
-        
-        return {'loss_oks_trans_xy': loss}
-    
-    def loss_ard(self, 
-                outputs, 
-                targets, 
-                indices,
-                num_boxes=None):
-        """
-        Absolute Relative Difference (ARD) loss for tz component.
-        
-        From YOLO-6D-Pose paper:
-        "For the tz component of the loss, we use Absolute relative difference (ARD) 
-        as an additional loss component in line with depth learning frameworks."
-        
-        ARD = |1 - t_zp / t_zg| = |t_zp - t_zg| / |t_zg|
-        
-        This loss measures the relative error of depth prediction, making it 
-        scale-invariant (objects at different depths are treated equally).
-        
-        Args:
-            outputs: dict containing:
-
-                - 'pred_translation': (B, Q, 3) predicted translations
-
-            targets: list of B dicts, each containing:
-
-                - 'relative_position': (N, 3) ground truth translations
-
-            indices: list of B tuples (pred_idx, tgt_idx) matching predictions to targets
-            num_boxes: optional, not used but kept for interface compatibility
-        
-        Returns:
-            dict with key 'loss_ard': scalar loss value
-        """
-        device = outputs['pred_translations'].device
-        pred_translations = outputs['pred_translations']  # (B, Q, 3)
-
-        total_loss = 0.0
-        num_valid = 0
-        
-        for b, (pred_idx, tgt_idx) in enumerate(indices):
-            if len(pred_idx) == 0:
-                continue
-            
-            # Extract matched predictions and ground truth
-            t_pred = pred_translations[b][pred_idx]       # (M, 3)
-            tgt = targets[b]
-            t_gt = tgt['relative_position'][tgt_idx]      # (M, 3)
-            
-            # Extract tz component (depth, z-axis: index 2)
-            tz_pred = t_pred[:, 2]  # (M,)
-            tz_gt = t_gt[:, 2]      # (M,)
-            
-            # Clamp ground truth to avoid division by zero
-            # Use absolute value since depth should be positive
-            tz_gt_safe = torch.clamp(torch.abs(tz_gt), min=1e-6)
-            
-            # Compute ARD: |1 - pred/gt| = |pred - gt| / gt
-            ard = torch.abs(1.0 - tz_pred / tz_gt_safe)  # (M,)
-            
-            # Accumulate mean loss for this batch element
-            total_loss += ard.mean()
-            num_valid += 1
-        
-        # Average over all batch elements with valid matches
-        if num_valid == 0:
-            loss = torch.zeros((), device=device, requires_grad=True)
-        else:
-            loss = total_loss / num_valid
+        loss = loss_ard.sum() / num_boxes
 
         return {'loss_ard_trans_z': loss}
 
@@ -1064,28 +1037,15 @@ class SetCriterion(nn.Module):
                     outputs, 
                     targets, 
                     indices,  
-                    num_boxes=None):
+                    num_boxes):
         
-        batch_idx, src_idx = self._get_src_permutation_idx(indices)
-        if len(src_idx) == 0:
-            device = outputs['pred_translations'].device
-            return {'loss_trans_z': torch.zeros((), device=device, requires_grad=True)}
-
-        # Matched predicted tz
-        pred_z = outputs['pred_translations'][batch_idx, src_idx][:, 2].unsqueeze(1)  # (N,1)
-
-        # Matched gt tz
-        gt_z = torch.cat([
-            t['relative_position'][tgt_idx][:, 2].unsqueeze(1)
-            for t, (_, tgt_idx) in zip(targets, indices) if len(tgt_idx) > 0
-        ], dim=0)  # (N,1)
-
-        raw_loss = self.mae_loss(pred_z, gt_z).sum()
-        denom = num_boxes if (num_boxes is not None and num_boxes > 0) else pred_z.shape[0]
-        loss_trn_z = raw_loss / denom
-        
-        return {'loss_ard_trans_z': loss_trn_z}
-    # Adapted adds_z loss from yolo6d code to DETR structure.
+        idx = self._get_src_permutation_idx(indices)
+        pred_trans_z = outputs['pred_translations'][idx][:,-1]  # (N, 1)
+        tgt_trans_z = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:,-1] # (N, 1)
+        loss_trans_z = self.mae_loss(pred_trans_z, tgt_trans_z).sum() / num_boxes
+       
+        return {'loss_ard_trans_z': loss_trans_z}
+    
     def adds_loss(self, 
                   pose_preds, 
                   pose_gt, 
@@ -1126,26 +1086,11 @@ class SetCriterion(nn.Module):
         loss_adds = loss_adds.mean()
         return loss_adds
     
-    def loss_trans(self, outputs, targets, indices, num_boxes, boxes_weight=None):
-        """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
-        targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
-        The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
-        """
-        loss_trn_xy = self.loss_oks(outputs, targets, indices, num_boxes=num_boxes)['loss_oks_trans_xy']
-        loss_trn_z = self.loss_ard(outputs, targets, indices, num_boxes=num_boxes)['loss_ard_trans_z'] 
-        losses = {}
-        lambda_xy = 1.0
-        lambda_z = 1.0
-        losses['loss_trans_xy'] = loss_trn_xy.sum() / num_boxes
-        losses['loss_trans_z'] = loss_trn_z.sum() / num_boxes
-        losses["loss_trans"] = lambda_xy * loss_trn_xy + lambda_z * loss_trn_z
-        return losses
-
     def loss_pose(self, 
               outputs, 
               targets, 
               indices,
-              num_boxes=None):
+              num_boxes):
         """
         Complete pose loss from YOLO-6D-Pose paper (Equation 23):
         
@@ -1179,18 +1124,22 @@ class SetCriterion(nn.Module):
         # Loss weights from paper (empirically tuned)
         lambda_adds = 1.0
         lambda_rot = 1.0
-        lambda_oks = 0.1
-        lambda_ard = 0.1
+        lambda_oks = 1.0
+        lambda_ard = 1.0
         
         # Compute individual losses
         loss_adds_dict = self.loss_adds(outputs, targets, indices)
-        loss_rot_dict = self.loss_rot(outputs, targets, indices)
-        loss_oks_dict = self.loss_oks_yolo6d(outputs, targets, indices)
-        loss_ard_dict = self.loss_trans_z(outputs, targets, indices)
+        loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
+        loss_oks_dict = self.loss_oks_vibed(outputs, targets, indices, num_boxes)
+        loss_ard_dict = self.loss_trans_z(outputs, targets, indices, num_boxes)
+        #loss_trans_dict = self.loss_translation(outputs, targets, indices)
+        #loss_oks_dict = None
+        #loss_ard_dict = None
         
         # Extract loss values
         loss_adds = loss_adds_dict['loss_adds']
         loss_rot = loss_rot_dict['loss_rot']
+        #loss_trans = loss_trans_dict['loss_translation']
         loss_oks = loss_oks_dict['loss_oks_trans_xy']
         loss_ard = loss_ard_dict['loss_ard_trans_z']
         
@@ -1202,6 +1151,12 @@ class SetCriterion(nn.Module):
             lambda_ard * loss_ard
         )
         
+        # loss_pose_total = (
+        #     lambda_adds * loss_adds +
+        #     lambda_rot * loss_rot * 
+        #     1.0 * loss_trans
+        # )
+
         # Return all components for logging
         return {
             'loss_pose': loss_pose_total,
@@ -1210,6 +1165,12 @@ class SetCriterion(nn.Module):
             'loss_ard_trans_z': loss_ard,
             'loss_adds': loss_adds
         }
+        # return {
+        #         'loss_pose': loss_pose_total,
+        #         'loss_rot': loss_rot,
+        #         'loss_translation': loss_trans,
+        #         'loss_adds': loss_adds
+        #     }
 
     ######################################################
 
@@ -1757,11 +1718,7 @@ class SetCriterion(nn.Module):
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
 
-    def _get_tgt_permutation_idx(self, indices):
-        # permute targets following indices
-        batch_idx = torch.cat([torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
-        tgt_idx = torch.cat([tgt for (_, tgt) in indices])
-        return batch_idx, tgt_idx
+
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {

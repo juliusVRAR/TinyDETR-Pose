@@ -388,18 +388,11 @@ class Matcher6D(nn.Module):
         pred_z: [num_queries, 1]
         target_z: [num_targets, 1]
         """
-        # Relative L1 cost
-        pred_z = pred_z.unsqueeze(1)      # [num_queries, 1, 1]
-        target_z = target_z.unsqueeze(0)   # [1, num_targets, 1]
+        # L2 distance
+        cost_z = torch.cdist(pred_z, target_z, p=2)
         
-        # Relative error: |pred - target| / target
-        cost_z = torch.abs(pred_z - target_z) / (torch.abs(target_z) + epsilon)
-        
-        return cost_z.squeeze(-1)  # [num_queries, num_targets]
+        return cost_z  # [num_queries, num_targets]
     
-    
-    
-
     @torch.no_grad()
     def forward(self, outputs, targets, group_detr=1):
         """Performs the matching
@@ -481,11 +474,11 @@ class Matcher6D(nn.Module):
             #                                                    tgt_translation)
             cost_trans_xy = self.compute_translation_xy_cost(out_translation[:, :2],
                                                             tgt_translation[:, :2])
-            #cost_trans_z = self.compute_translation_z_cost(out_translation[:, 2:3],
-            #                                              tgt_translation[:, 2:3])
+            cost_trans_z = self.compute_translation_z_cost(out_translation[:, 2:3],
+                                                          tgt_translation[:, 2:3])
             lambda_xy = 1.0
             lambda_z = 1.0
-            cost_translation = (lambda_xy * cost_trans_xy) #+ (lambda_z * cost_trans_z)
+            cost_translation = (lambda_xy * cost_trans_xy) + (lambda_z * cost_trans_z)
 
             # Add to total cost
             C += self.cost_rotation * cost_rotation + self.cost_translation * cost_translation
