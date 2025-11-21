@@ -359,6 +359,7 @@ class SetCriterion(nn.Module):
         self.ia_bce_loss = ia_bce_loss
         # Needed for Yolox6d losses
         self.mae_loss = nn.L1Loss(reduction="none")
+        self.mse_loss = nn.MSELoss(reduction="none")
         self.shape_loss = False
         self.warm_up_epochs = 5
 
@@ -715,7 +716,7 @@ class SetCriterion(nn.Module):
         else:
             loss = total / count
 
-        return {'loss_oks_trans_xy': loss}
+        return {'loss_trans_xy': loss}
 
     def loss_oks(self, outputs, targets, indices, num_boxes=None):
         
@@ -791,7 +792,7 @@ class SetCriterion(nn.Module):
         else:
             loss = total / count
 
-        return {'loss_oks_trans_xy': loss}
+        return {'loss_trans_xy': loss}
     
     def loss_oks_2(self, outputs, targets, indices, num_boxes=None):
         
@@ -865,7 +866,7 @@ class SetCriterion(nn.Module):
         else:
             loss = total / count
 
-        return {'loss_oks_trans_xy': loss}
+        return {'loss_trans_xy': loss}
     def loss_oks_yolo6d(self, 
                     outputs, 
                     targets, 
@@ -959,13 +960,14 @@ class SetCriterion(nn.Module):
         else:
             loss = total_loss / num_valid
         #print(f"d_mean={d2.sqrt().mean():.3f} area_mean={area.mean():.3f} exp_min={exponent.min():.2f} exp_max={exponent.max():.2f}")
-        return {'loss_oks_trans_xy': loss}
-    
-    def loss_ard_mine(self, 
-                    outputs, 
-                    targets, 
-                    indices,
-                    num_boxes):
+        return {'loss_trans_xy': loss}
+    # From: Review of monocular depth estimation methods
+    # https://www.spiedigitallibrary.org/journals/journal-of-electronic-imaging/volume-34/issue-02/020901/Review-of-monocular-depth-estimation-methods/10.1117/1.JEI.34.2.020901.full#r81
+    def loss_ard(self, 
+                outputs, 
+                targets, 
+                indices,
+                num_boxes):
         eps=1e-8
         idx = self._get_src_permutation_idx(indices)
         pred_trans_z = outputs['pred_translations'][idx][:,-1]  # (N, 1)
@@ -977,7 +979,7 @@ class SetCriterion(nn.Module):
         
         loss = loss_ard.sum() / num_boxes
 
-        return {'loss_ard_trans_z': loss}
+        return {'loss_trans_z': loss}
 
     # Adapted adds_z/translation z loss from yolo6d code to DETR structure.
     def loss_adds_z(self, 
@@ -988,50 +990,17 @@ class SetCriterion(nn.Module):
         """
         Depth (tz) ADD-style normalized loss.
         Original adds_loss_z logic adapted to DETR:
-            |pred_z - gt_z| * 100 / diameter(object)
-        Uses matched predictions only.
+            |pred_z - gt_z| * 1000 / diameter(object)
         Returns:
             {'loss_add_z': scalar}
         """
-        assert 'pred_translations' in outputs, "Missing pred_translations in outputs"
-        device = outputs['pred_translations'].device
-
-        batch_idx, src_idx = self._get_src_permutation_idx(indices)
-        if len(src_idx) == 0:
-            return {'loss_add_z': torch.zeros((), device=device, requires_grad=True)}
-
-        # Matched predicted translations
-        pred_t = outputs['pred_translations'][batch_idx, src_idx]  # (N,3)
-        pred_z = pred_t[:, 2]                                      # (N,)
-
-        # Gather matched gt z and diameters
-        gt_z_list = []
-        diam_list = []
-        for t, (_, tgt_idx) in zip(targets, indices):
-            if len(tgt_idx) == 0:
-                continue
-            gt_z_list.append(t['relative_position'][tgt_idx][:, 2])  # (Mi,)
-            if 'diameter' in t:
-                diam_list.append(t['diameter'][tgt_idx])             # (Mi,)
-            else:
-                diam_list.append(torch.ones(len(tgt_idx), device=device))
-
-        gt_z = torch.cat(gt_z_list, dim=0)          # (N,)
-        diam = torch.cat(diam_list, dim=0)          # (N,)
-        diam_safe = torch.clamp(diam, min=1e-6)
-        loss_add_z = (self.mae_loss(pred_z, gt_z)*100 / diam_safe).sum()/len(outputs['pred_translations'])
-
-        return {'loss_ard_trans_z': loss_add_z}
-    
-    def adds_loss_z(self, preds, targets, cls_targets):
-        """
-        Normalize the depth error with diameter of that object.
-        """
-        models_diameter = torch.tensor(list(self.cad_models.models_diameter.values()), device=targets.device)
-        cls_targets = cls_targets.to(torch.int64)
-        models_diameter = models_diameter[cls_targets]
-        loss_trn_z = (self.mae_loss(preds, targets)*100 / models_diameter[:, None]).sum()/len(preds)
-        return loss_trn_z
+        idx = self._get_src_permutation_idx(indices)
+        pred_trans_z = outputs['pred_translations'][idx][:,-1]  # (N, 1)
+        tgt_trans_z = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:,-1] # (N, 1)
+        tgt_diam = torch.cat([t['diameter'][i] for t, (_, i) in zip(targets, indices)], dim=0)  # (N,) 
+        loss_adds_z = (self.mae_loss(pred_trans_z, tgt_trans_z)*1000.0 / tgt_diam).sum() / num_boxes
+       
+        return {'loss_trans_z': loss_adds_z}
     
     def loss_trans_z(self, 
                     outputs, 
@@ -1044,8 +1013,49 @@ class SetCriterion(nn.Module):
         tgt_trans_z = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:,-1] # (N, 1)
         loss_trans_z = self.mae_loss(pred_trans_z, tgt_trans_z).sum() / num_boxes
        
-        return {'loss_ard_trans_z': loss_trans_z}
+        return {'loss_trans_z': loss_trans_z}
     
+
+    def loss_trans_z_l2(self, outputs, targets, indices, num_boxes=None):
+        """
+        Compute the loss related to the translation of pose estimation, namely the mean square error (MSE)/ L2 Loss.
+        outputs must contain the key 'pred_translation', while targets must contain the key 'relative_position'
+        Position / Translation are expected in [x, y, z] meters 
+        """
+        idx = self._get_src_permutation_idx(indices)
+        pred_trans_z = outputs['pred_translations'][idx][:,-1]  # (N, 1)
+        tgt_trans_z = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:,-1] # (N, 1)
+        n_obj = len(tgt_trans_z)
+
+        loss_trans_z = F.mse_loss(pred_trans_z, tgt_trans_z, reduction='none')
+        loss_trans_z = torch.sum(loss_trans_z, dim=1)
+        loss_trans_z = torch.sqrt(loss_trans_z + 1e-6)  # to avoid NaN
+        
+        loss_trans_z = loss_trans_z.sum() / n_obj
+        return {'loss_trans_z': loss_trans_z}
+    
+
+    # Deeper Depth Prediction with Fully Convolutional Residual Networks - BerHu Loss
+    # https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=7785097
+    def loss_berhu_trans_z(self, 
+                        outputs, 
+                        targets, 
+                        indices,  
+                        num_boxes):
+        
+        idx = self._get_src_permutation_idx(indices)
+        pred_trans_z = outputs['pred_translations'][idx][:,-1]  # (N, 1)
+        tgt_trans_z = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:,-1] # (N, 1)
+        
+        loss_trans_z = self.mae_loss(pred_trans_z, tgt_trans_z).sum() / num_boxes
+        c = torch.abs(pred_trans_z - tgt_trans_z).max() * 0.2
+        if loss_trans_z <= c:
+            return {'loss_trans_z': loss_trans_z}
+        else:
+            loss_trans_z = ((tgt_trans_z - pred_trans_z)**2 + c**2 / 2*c).sum() / num_boxes
+            return {'loss_trans_z': loss_trans_z}
+
+            
     def adds_loss(self, 
                   pose_preds, 
                   pose_gt, 
@@ -1119,7 +1129,6 @@ class SetCriterion(nn.Module):
         Returns:
             dict with individual and total pose losses
         """
-        device = outputs['pred_rotations'].device
         
         # Loss weights from paper (empirically tuned)
         lambda_adds = 1.0
@@ -1140,8 +1149,8 @@ class SetCriterion(nn.Module):
         loss_adds = loss_adds_dict['loss_adds']
         loss_rot = loss_rot_dict['loss_rot']
         #loss_trans = loss_trans_dict['loss_translation']
-        loss_oks = loss_oks_dict['loss_oks_trans_xy']
-        loss_ard = loss_ard_dict['loss_ard_trans_z']
+        loss_oks = loss_oks_dict['loss_trans_xy']
+        loss_ard = loss_ard_dict['loss_trans_z']
         
         # Total weighted pose loss
         loss_pose_total = (
@@ -1161,8 +1170,8 @@ class SetCriterion(nn.Module):
         return {
             'loss_pose': loss_pose_total,
             'loss_rot': loss_rot,
-            'loss_oks_trans_xy': loss_oks,
-            'loss_ard_trans_z': loss_ard,
+            'loss_trans_xy': loss_oks,
+            'loss_trans_z': loss_ard,
             'loss_adds': loss_adds
         }
         # return {
