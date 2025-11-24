@@ -445,7 +445,7 @@ class ProcessPoseData(object):
             u = fx * (X / Z) + cx
             v = fy * (Y / Z) + cy
             object_center_2d = torch.stack([u, v], dim=1)  # pixels
-
+        # Dont normalize here, do it later if needed in the model
         centers_img = draw_object_centers(image, object_center_2d)
         cv2.imwrite(str(Path(DEBUG_OUT, "object_centers.png")), centers_img)
         # ------------------------------------------------------------------

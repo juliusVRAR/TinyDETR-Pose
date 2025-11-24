@@ -391,7 +391,7 @@ class SetCriterion(nn.Module):
         self.use_varifocal_loss = use_varifocal_loss
         self.use_position_supervised_loss = use_position_supervised_loss
         self.ia_bce_loss = ia_bce_loss
-        # Needed for Yolox6d losses
+        
         self.mae_loss = nn.L1Loss(reduction="none")
         self.mse_loss = nn.MSELoss(reduction="none")
         self.shape_loss = False
@@ -419,7 +419,7 @@ class SetCriterion(nn.Module):
         losses["loss_translation"] = loss_translation.sum() / n_obj
         return losses
 
-    # Not symmetry/geometric aware
+    # geodesic distance loss for rotation matrix
     def loss_rotation(self,
                       outputs,
                       targets, 
@@ -523,120 +523,13 @@ class SetCriterion(nn.Module):
 
         # Key remains loss_adds (rotation-only if shape_loss True)
         return {'loss_adds': loss_adds}
-    ### Is wrong version of ADD-S. ADD-S uses closest point distance, not squared distance
-    def loss_adds_mse(self, 
-                outputs, 
-                targets, 
-                indices, 
-                num_boxes=None, 
-                shape_loss=False):
-        """
-        Compute ADD-S loss for 6D pose estimation.
-        ADD / ADD-S MSE loss (fully squared: distances² / diameter²).
-        Note: This differs from standard ADD/ADD-S metric which uses linear distances.
-
-        Args:
-            outputs: Dict containing:
-
-                - 'pred_rotation': Predicted rotation matrices [batch, num_queries, 3, 3]
-                - 'pred_translation': Predicted translations [batch, num_queries, 3]
-
-            targets: List of dicts, each containing:
-
-                - 'rotation': Ground-truth rotation [num_objects, 3, 3]
-                - 'translation': Ground-truth translation [num_objects, 3]
-
-                - 'model_points': 3D model points [num_objects, num_points, 3]
-                - 'diameter': Object diameter [num_objects]
-
-                - 'symmetric': Boolean mask [num_objects]
-
-                - 'shape_loss': if True ignore translation (use rotation-only shape alignment).
-
-            indices: List of (pred_idx, target_idx) tuples from matcher
-            num_boxes: Number of boxes for normalization
-        
-        Returns:
-            loss_dict: Dictionary with ADD-S loss
-        """
-        # Extract predictions
-        device = outputs['pred_rotation'].device
-        pred_rotations = outputs['pred_rotations']  # [batch, num_queries, 3, 3]
-        pred_translations = outputs['pred_translations']  # [batch, num_queries, 3]
-        # Flag precedence: explicit param overrides self.shape_loss
-        use_shape_loss = self.shape_loss if shape_loss is None else shape_loss
-        total_loss = 0.0
-        num_valid = 0
-        
-        # Iterate over batch
-        for batch_idx, (pred_idx, target_idx) in enumerate(indices):
-            if len(pred_idx) == 0:
-                continue
-                
-            # Get matched predictions
-            batch_pred_rot = pred_rotations[batch_idx][pred_idx]  # [num_matched, 3, 3]
-            batch_pred_trans = pred_translations[batch_idx][pred_idx]  # [num_matched, 3]
-            
-            # Get ground truth
-            target_data = targets[batch_idx]
-            batch_gt_rot = target_data['relative_rotation'][target_idx]  # [num_matched, 3, 3]
-            batch_gt_trans = target_data['relative_position'][target_idx]  # [num_matched, 3]
-            batch_model_points = target_data['model_points'][target_idx]  # [num_matched, num_points, 3]
-            batch_diameter = target_data['diameter'][target_idx]  # [num_matched]
-            batch_symmetric = target_data['is_symmetric'][target_idx]  # [num_matched]
-            
-            # Compute loss for each matched pair
-            for i in range(len(pred_idx)):
-                R_p = batch_pred_rot[i]  # [3, 3]
-                t_p = batch_pred_trans[i]  # [3]
-                R_g = batch_gt_rot[i]  # [3, 3]
-                t_g = batch_gt_trans[i]  # [3]
-                model_pts = batch_model_points[i]  # [num_points, 3]
-                diameter = batch_diameter[i]
-                is_symmetric = batch_symmetric[i]
-                
-                # Transform model points with predicted pose
-                # pts_pred = R_p @ model_pts.T + t_p -> [3, num_points]
-                pts_pred = torch.matmul(R_p, model_pts.T) + t_p.unsqueeze(1)
-                pts_pred = pts_pred.T  # [num_points, 3]
-                
-                # Transform model points with ground-truth pose
-                pts_gt = torch.matmul(R_g, model_pts.T) + t_g.unsqueeze(1)
-                pts_gt = pts_gt.T  # [num_points, 3]
-                
-                if is_symmetric:
-                    # ADD-S: For each predicted point, find closest ground-truth point
-                    # Compute pairwise distances: [num_points, num_points]
-                    diff = pts_pred.unsqueeze(1) - pts_gt.unsqueeze(0)  # [num_points, num_points, 3]
-                    distances = torch.norm(diff, dim=2)  # [num_points, num_points]
-                    
-                    # Take minimum distance for each predicted point
-                    min_distances, _ = torch.min(distances, dim=1)  # [num_points]
-                    point_loss = min_distances
-                else:
-                    # ADD: Direct point-to-point distance
-                    diff = pts_pred - pts_gt  # [num_points, 3]
-                    point_loss = torch.norm(diff, dim=1)  # [num_points]
-                
-                # Normalize by diameter and average over points
-                normalized_loss = (point_loss / diameter).pow(2).mean()
-                total_loss += normalized_loss
-                num_valid += 1
-        
-        # Average over all matched objects
-        if num_valid > 0:
-            loss = total_loss / num_valid
-        else:
-            loss = torch.tensor(0.0, device=pred_rotations.device, requires_grad=True)
-        # TODO: Rename this to loss_adds
-        return {'loss_rot': loss}
-    
+    # Rotation loss from YOLO-6D Paper (6D representation with L1 loss) 
     def loss_rot(self, 
                  outputs, 
                  targets, 
                  indices,  
                  num_boxes):
-        """Rotation loss from YOLO-6D Paper."""
+        """."""
 
         idx = self._get_src_permutation_idx(indices)
         src_rot = outputs["pred_rotations"][idx]          # (N,6) or (N,3,3)
@@ -663,7 +556,7 @@ class SetCriterion(nn.Module):
         losses["loss_rot"] = loss_rot / 6.0
         return losses
     #### End My ADD-S and Rot loss. TODO: Check if it differs from the YOLOX6d implementation
-    
+    ## YOLOX6D Keypoint loss (2D projection of 3D center)
     def kpts_loss(self, 
                   kpts_preds, 
                   kpts_targets, 
@@ -678,155 +571,8 @@ class SetCriterion(nn.Module):
         lkpt = (1 - oks).mean(axis=1)
         return lkpt
 
-    def loss_oks_vibed(self, outputs, targets, indices, num_boxes):
-        
-        device = outputs['pred_translations'].device 
-        
-        sigmas = torch.tensor([.26], device=device) / 10.0
-        k = 2*sigmas
-        EPSILON = torch.finfo(torch.float32).eps
-        
-        total = 0.0
-        count = 0
-
-        # Camera intrinsics (assumed pixels)
-        K = {
-            "cx": 312.9869,
-            "cy": 241.3109,
-            "depth_scale": 0.1,
-            "fx": 1066.778,
-            "fy": 1067.487,
-            "height": 480,
-            "width": 640
-        }
-        fx = K['fx']; fy = K['fy']; cx = K['cx']; cy = K['cy']
-        W = torch.as_tensor(K['width'], device=device, dtype=torch.float32)
-        H = torch.as_tensor(K['height'], device=device, dtype=torch.float32)
-        WH = torch.stack([W, H])  # (2,)
-
-        for b, (pred_idx, tgt_idx) in enumerate(indices):
-            if len(pred_idx) == 0:
-                continue
-
-            # (M,3) translation in camera coords 
-            pred_t = outputs['pred_translations'][b][pred_idx]  
-            object_center_gt_norm = targets[b]['object_center_2d'][tgt_idx]  # (M,2) normalized
-            # Preds mm to m ?
-            X = pred_t[:, 0] * 1000.0
-            Y = pred_t[:, 1] * 1000.0
-            Z = pred_t[:, 2] * 1000.0
-            # Project to pixel space
-            u = fx * (X / Z) + cx
-            v = fy * (Y / Z) + cy
-            object_center_pred_px = torch.stack([u, v], dim=1)  # (M,2) pixels
-
-            # GT to pixel space 
-            object_center_gt_px = object_center_gt_norm * WH  # (M,2)
-
-            kpts_preds_x, kpts_targets_x = object_center_pred_px[:, 0:1], object_center_gt_px[:, 0:1]
-            kpts_preds_y, kpts_targets_y = object_center_pred_px[:, 1:2], object_center_gt_px[:, 1:2]
-            # OKS based loss
-            #dist_sq = (kpts_preds_x - kpts_targets_x) ** 2 + (kpts_preds_y - kpts_targets_y) ** 2
-            dist_sq = (kpts_targets_x - kpts_preds_x) ** 2 + (kpts_targets_y - kpts_preds_y) ** 2
-            # Box area in pixels
-            boxes = targets[b]['boxes'][tgt_idx]  # (M,4) cx,cy,w,h normalized
-            w_pix = boxes[:, 2] * W
-            h_pix = boxes[:, 3] * H
-            area_pix = (w_pix * h_pix)  #area in pixels
-
-            # OKS: exp(-d² / (2 * s_b² * k²))
-            denominator = 2*(k**2)* (area_pix + EPSILON)        
-            exponent = dist_sq / denominator
-            oks = torch.exp(-exponent)
-
-            loss_vec = 1.0 - oks
-            total += loss_vec.mean()
-            count += 1
-
-        if count == 0:
-            loss = torch.zeros((), device=device, requires_grad=True)
-        else:
-            loss = total / count
-
-        return {'loss_trans_xy': loss}
-
-    def loss_oks(self, outputs, targets, indices, num_boxes=None):
-        
-        device = outputs['pred_translations'].device 
-        
-        k = 0.1
-        k_squared = k ** 2
-        
-        total = 0.0
-        count = 0
-
-        # Project 3D → 2D Pixel-coordinates using camera intrinsics
-        K = {
-            "cx": 312.9869,
-            "cy": 241.3109,
-            "depth_scale": 0.1,
-            "fx": 1066.778,
-            "fy": 1067.487,
-            "height": 480,
-            "width": 640
-            }
-        if K is None:
-            raise ValueError("Camera intrinsics 'K' required for OKS loss")
-        fx = K['fx']
-        fy = K['fy']
-        cx = K['cx']
-        cy = K['cy']
-        # Image size
-        W = torch.as_tensor(K['width'], device=device, dtype=torch.float32)
-        H = torch.as_tensor(K['height'], device=device, dtype=torch.float32)
-        WH = torch.tensor([W, H], dtype=torch.float32).to(device=device)
-        for b, (pred_idx, tgt_idx) in enumerate(indices):
-            if len(pred_idx) == 0:
-                continue
-
-            pred_t = outputs['pred_translations'][b][pred_idx]  # (M,3) preds are in camera coords and mm
-            object_center_gt = targets[b]['object_center_2d'][tgt_idx]  # (M,2) object centers normalized just as boxes
-
-            X = pred_t[:, 0] * 1000.0
-            Y = pred_t[:, 1] * 1000.0
-            Z = pred_t[:, 2] * 1000.0
-            u = fx * (X / Z) + cx
-            v = fy * (Y / Z) + cy
-            object_center_pred = torch.stack([u, v], dim=1)  # (M,2) in pixel space
-            # Normalized pixel-space 
-            object_center_pred = object_center_pred / WH
-
-            kpts_preds_x, kpts_targets_x = object_center_pred[:, 0:1], object_center_gt[:, 0:1]
-            kpts_preds_y, kpts_targets_y = object_center_pred[:, 1:2], object_center_gt[:, 1:2]
-            # OKS based loss
-            d2 = (kpts_preds_x - kpts_targets_x) ** 2 + (kpts_preds_y - kpts_targets_y) ** 2
-
-            #d2 = (object_center_pred - gt_centers_px).pow(2).sum(dim=-1)  # (M,)
-
-            # Box area in pixels
-            boxes = targets[b]['boxes'][tgt_idx]               # (M,4) cx,cy,w,h normalized
-            area = boxes[:, 2] * boxes[:, 3]                   # (M,)
-                                   
-            area = area.clamp(min=1e-3)                     # avoid too tiny denominators
-            s_b2 = area ** 2              
-            exponent = d2 / (2.0 * s_b2 * k_squared)  # small epsilon for numerical stability
-            oks = torch.exp(-(exponent))
-            loss_vec = 1.0 - oks
-            total += loss_vec.mean()
-            count += 1
-
-            # Optional debug (comment out in production)
-            # if b == 0:
-            #     print(f"[OKS] d_mean={d2.sqrt().mean():.2f}px area_mean={area_pix.mean():.1f} exp_min={exponent.min():.1f} exp_max={exponent.max():.1f}")
-
-        if count == 0:
-            loss = torch.zeros((), device=device, requires_grad=True)
-        else:
-            loss = total / count
-
-        return {'loss_trans_xy': loss}
-    
-    def loss_oks_2(self, outputs, targets, indices, num_boxes=None):
+    # TODO: Check if this is implemented correctly
+    def loss_oks(self, outputs, targets, indices, num_boxes):
         
         device = outputs['pred_translations'].device 
         sigmas = torch.tensor([.26], device=device) / 10.0
@@ -835,164 +581,29 @@ class SetCriterion(nn.Module):
         
         total = 0.0
         count = 0
-
-        # Project 3D → 2D Pixel-coordinates using camera intrinsics
-        K = {
-            "cx": 312.9869,
-            "cy": 241.3109,
-            "depth_scale": 0.1,
-            "fx": 1066.778,
-            "fy": 1067.487,
-            "height": 480,
-            "width": 640
-            }
-        if K is None:
-            raise ValueError("Camera intrinsics 'K' required for OKS loss")
-        fx = K['fx']
-        fy = K['fy']
-        cx = K['cx']
-        cy = K['cy']
-        # Image size
-        W = torch.as_tensor(K['width'], device=device, dtype=torch.float32)
-        H = torch.as_tensor(K['height'], device=device, dtype=torch.float32)
-        WH = torch.tensor([W, H], dtype=torch.float32).to(device=device)
-        for b, (pred_idx, tgt_idx) in enumerate(indices):
-            if len(pred_idx) == 0:
-                continue
-
-            pred_t = outputs['pred_translations'][b][pred_idx]  # (M,3) preds are in camera coords and mm
-            object_center_gt = targets[b]['object_center_2d'][tgt_idx]  # (M,2) object centers normalized just as boxes
-
-            X = pred_t[:, 0] * 1000.0
-            Y = pred_t[:, 1] * 1000.0
-            Z = pred_t[:, 2] * 1000.0
-            u = fx * (X / Z) + cx
-            v = fy * (Y / Z) + cy
-            object_center_pred = torch.stack([u, v], dim=1)  # (M,2) in pixel space
-            # Normalized pixel-space just as bboxes
-            object_center_pred = object_center_pred / WH
-
-            kpts_preds_x, kpts_targets_x = object_center_pred[:, 0:1], object_center_gt[:, 0:1]
-            kpts_preds_y, kpts_targets_y = object_center_pred[:, 1:2], object_center_gt[:, 1:2]
-            # OKS based loss
-            dist_sq = (kpts_preds_x - kpts_targets_x) ** 2 + (kpts_preds_y - kpts_targets_y) ** 2
-
-            # Box area in pixels
-            boxes = targets[b]['boxes'][tgt_idx]               # (M,4) cx,cy,w,h normalized
-            area = boxes[:, 2] * boxes[:, 3]                   # (M,)
-
-            denominator = 2*(k**2)* (area + EPSILON)        
-            exponent = dist_sq / denominator 
-            
-            oks = torch.exp(-(exponent))
-            loss_vec = 1.0 - oks
-            total += loss_vec.mean()
-            count += 1
-
-            # Optional debug (comment out in production)
-            # if b == 0:
-            #     print(f"[OKS] d_mean={d2.sqrt().mean():.2f}px area_mean={area_pix.mean():.1f} exp_min={exponent.min():.1f} exp_max={exponent.max():.1f}")
-
-        if count == 0:
-            loss = torch.zeros((), device=device, requires_grad=True)
-        else:
-            loss = total / count
-
-        return {'loss_trans_xy': loss}
-    def loss_oks_yolo6d(self, 
-                    outputs, 
-                    targets, 
-                    indices,
-                    num_boxes=None):
-        """
-        Object Keypoint Similarity (OKS) loss for tx, ty components.
+        idx = self._get_src_permutation_idx(indices)
+        # Get the predicted Normalized UV for matched queries
+        src_norm_uv = outputs['pred_uv_norm'][idx]
+        tgt_norm_uv = torch.cat([t['object_center_2d'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         
-        From YOLO-6D-Pose paper (Equation 21):
-        "Since our proposed network predicts the projection of [tx, ty] on the image, 
-        we add a loss term to make the 2D prediction accurate. This task is similar 
-        to predicting a keypoint per object. Hence, we use a simplified version of 
-        Object Keypoint Similarity (OKS) loss."
-        
-        L_OKS = 1 - OKS = 1 - exp(-d²/(2*s_b²*k²))
-        
-        where:
+        boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)              # (M,4) cx,cy,w,h normalized
+        # Box area in normalized pixel space
+        area = boxes[:, 2] * boxes[:, 3]                   # (M,)
 
-            - d: Euclidean distance between GT and predicted projection of 3D centroid
-            - s_b: square root of bounding box area (object scale)
+        kpts_preds_x, kpts_targets_x = src_norm_uv[:, 0:1], tgt_norm_uv[:, 0:1]
+        kpts_preds_y, kpts_targets_y = src_norm_uv[:, 1:2], tgt_norm_uv[:, 1:2]
+        # OKS based loss
+        dist_sq = (kpts_preds_x - kpts_targets_x) ** 2 + (kpts_preds_y - kpts_targets_y) ** 2
 
-            - k: keypoint-specific constant (empirically set to 0.1)
-        
-        Args:
-            outputs: dict containing:
+        denominator = 2*(k**2)* (area + EPSILON)        
+        exponent = dist_sq / denominator
 
-                - 'pred_translation': (B, Q, 3) predicted translations
-                - Optional: 'pred_boxes': (B, Q, 4) for box area, else computed from targets
+        oks = torch.exp(-exponent)
+        loss_vec = 1.0 - oks
+        total = loss_vec.sum()
+        loss = total / num_boxes
 
-            targets: list of B dicts, each containing:
-
-                - 'relative_position': (N, 3) ground truth translations
-                - 'boxes': (N, 4) bounding boxes in [x1, y1, x2, y2] format (optional)
-
-                - Optional: camera intrinsics for projection
-
-            indices: list of B tuples (pred_idx, tgt_idx) matching predictions to targets
-            num_boxes: optional, not used but kept for interface compatibility
-        
-        Returns:
-            dict with key 'loss_oks': scalar loss value
-        """
-        device = outputs['pred_translations'].device
-        
-        # Keypoint-specific weight constant
-        k = 0.1
-        k_squared = k ** 2
-        
-        total_loss = 0.0
-        num_valid = 0
-        
-        for b, (pred_idx, tgt_idx) in enumerate(indices):
-            if len(pred_idx) == 0:
-                continue
-            
-            # Extract matched predictions and ground truth
-            t_pred_xy = outputs['pred_translations'][b][pred_idx][:, :2]       # (M, 2)
-            t_gt_xy = targets[b]['object_center_2d'][tgt_idx][:, :2]
-            
-            # Compute Euclidean distance d
-            
-            # d² per matched pair
-            d2 = (t_pred_xy - t_gt_xy).pow(2).sum(dim=-1)
-            # Boxes are in format cxcywh
-            # Boxes (cx,cy,w,h) normalized -> convert to pixels if image size known
-            boxes = targets[b]['boxes'][tgt_idx]
-            
-            # Box areas (normalized)
-            boxes = targets[b]['boxes'][tgt_idx]  # (M,4) cx,cy,w,h normalized
-            w = boxes[:, 2]
-            h = boxes[:, 3]
-            area = (w * h)
-
-           
-            s_b_squared  = torch.clamp(area, min=1e-6).pow(2)
-
-            # Compute OKS: exp(-d²/(2*s_b²*k²))
-            # Prepare exponent
-            denominator = (2 * s_b_squared * k_squared)
-            exponent = (-(d2) / denominator + 1e-9 ) # small epsilon for numerical stability
-
-            oks = torch.exp(exponent)
-            # Loss: L_OKS = 1 - OKS
-            loss = 1.0 - oks                        # (M,)
-            total_loss += loss.mean()
-            num_valid += 1
-        
-        # Average over all batch elements with valid matches
-        if num_valid == 0:
-            loss = torch.zeros((), device=device, requires_grad=True)
-        else:
-            loss = total_loss / num_valid
-        #print(f"d_mean={d2.sqrt().mean():.3f} area_mean={area.mean():.3f} exp_min={exponent.min():.2f} exp_max={exponent.max():.2f}")
-        return {'loss_trans_xy': loss}
+        return {'loss_keypoint': loss}
     # From: Review of monocular depth estimation methods
     # https://www.spiedigitallibrary.org/journals/journal-of-electronic-imaging/volume-34/issue-02/020901/Review-of-monocular-depth-estimation-methods/10.1117/1.JEI.34.2.020901.full#r81
     def loss_ard(self, 
@@ -1184,7 +795,7 @@ class SetCriterion(nn.Module):
         """
         
         # Loss weights from paper (empirically tuned)
-        lambda_adds = 1.0
+        lambda_adds = 1.0 # Gemini says this should be less: # Start small! This loss can be large in magnitude. 0.1 
         lambda_rot = 1.0
         lambda_kpt = 1.0
         lambda_trans = 1.0
@@ -1194,9 +805,6 @@ class SetCriterion(nn.Module):
         loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
         loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
         loss_trans_dict = self.loss_trans_3d(outputs, targets, indices, num_boxes)
-        #loss_trans_dict = self.loss_translation(outputs, targets, indices)
-        #loss_oks_dict = None
-        #loss_ard_dict = None
         
         # Extract loss values
         loss_adds = loss_adds_dict['loss_adds']
