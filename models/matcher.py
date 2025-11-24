@@ -233,7 +233,7 @@ class Matcher6D(nn.Module):
                  cost_bbox: float = 1, 
                  cost_giou: float = 1,
                  cost_rotation: float = 1,
-                 cost_translation: float = 1, 
+                 cost_keypoint: float = 1, 
                  rotation_representation: str = '6d'):
         """Creates the matcher
         
@@ -251,7 +251,7 @@ class Matcher6D(nn.Module):
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
         self.cost_rotation = cost_rotation
-        self.cost_translation = cost_translation
+        self.cost_keypoint = cost_keypoint
         self.rotation_representation = rotation_representation
         
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
@@ -369,7 +369,7 @@ class Matcher6D(nn.Module):
         return torch.cdist(pred_translations, target_translations, p=2)
     
     #TODO: YOLOX6d approach for translation cost. We split yx and z of the tranlation vector
-    def compute_translation_xy_cost(self, pred_xy, target_xy):
+    def compute_keypoint_cost(self, pred_xy, target_xy):
         """
         pred_xy: [num_queries, 2] - predicted xy translations
         target_xy: [num_targets, 2] - ground truth xy translations
@@ -424,65 +424,30 @@ class Matcher6D(nn.Module):
         out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
         
-        # TODO: add support for yx and z translation predictions like YOLOX6D
-        # Handle 6D pose predictions if available
-        if self.rotation_representation == '6d':
-            out_rotation = outputs["pred_rotations"].flatten(0, 1)  # [batch_size * num_queries, 9]
-            out_translation = outputs["pred_translations"].flatten(0, 1)  # [batch_size * num_queries, 3]
+        pred_uv_norm = outputs["pred_uv_norm"].flatten(0, 1)  # [batch_size * num_queries, 2]
+        out_keypoint = pred_uv_norm
+        
         # Also concat the target labels and boxes
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
-       
-        # Handle 6D pose targets in GrammSchmidt representation
-        if self.rotation_representation == "6d":
-            tgt_rotation = torch.cat([v["relative_rotation"] for v in targets])
-            # TODO: Check in dataloader which 6d conversion we need here (gram-schmidt or raw 6d)
-            tgt_rotation = torch.cat([v["relative_rotation_gs"] for v in targets])  # shape: [N, 6]
-        else: 
-            NotImplementedError("Only 6D rotation representation is currently supported in Matcher6D")
-        
-        tgt_translation = torch.cat([v["relative_position"] for v in targets], dim=0)  # shape: [N, 2]
+        tgt_keypoint = torch.cat([v["object_center_2d"] for v in targets], dim=0)  # shape: [N, 2]
 
         # Compute the classification cost. Contrary to the loss, we don't use the NLL,
         # but approximate it in 1 - proba[target class].
         # The 1 is a constant that doesn't change the matching, it can be ommitted.
         cost_class = -out_prob[:, tgt_ids]
-
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
-        # TODO: Test if this performs better this is what poet does
-        # Compute L1 cost between box centers
-        # cost_bbox = torch.cdist(out_bbox[:, 0:2], tgt_bbox[:, 0:2], p=1)
         # Compute the giou cost betwen boxes
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
-        # Initialize final cost matrix
-        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+         # Compute the L1 cost between object keypoints (projected uv coords derived from xy translations)
+        cost_keypoint = torch.cdist(out_keypoint, tgt_keypoint, p=1) 
         
-        # Add 6D pose costs
-        if self.rotation_representation == "6d" and "pred_rotations" in outputs and "pred_translations" in outputs:
-            #cost_rotation = self.compute_rotation_cost(pred_rotations=out_rotation, 
-            #                                               target_rotations=tgt_rotation)
-            # From T6D paper
-            cost_rotation = self.compute_rotation_cost_angular(pred_rotations=out_rotation,
-                                                                    target_rotations=tgt_rotation)
-            # Compute translation cost (l1)
-            #cost_translation = self.compute_translation_cost_l1(out_translation, 
-            #                                                   tgt_translation)
-            # Compute translation cost (l2) T6D does this
-            #cost_translation_l2 = self.compute_translation_cost_l2(out_translation, 
-            #                                                    tgt_translation)
-            cost_trans_xy = self.compute_translation_xy_cost(out_translation[:, :2],
-                                                            tgt_translation[:, :2])
-            cost_trans_z = self.compute_translation_z_cost(out_translation[:, 2:3],
-                                                          tgt_translation[:, 2:3])
-            lambda_xy = 1.0
-            lambda_z = 1.0
-            cost_translation = (lambda_xy * cost_trans_xy) + (lambda_z * cost_trans_z)
-
-            # Add to total cost
-            C += self.cost_rotation * cost_rotation + self.cost_translation * cost_translation
-
+        # Add to total cost
+        # Initialize final cost matrix
+        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou + self.cost_keypoint * cost_keypoint
+        
         C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]
@@ -520,4 +485,4 @@ def build_matcher(args):
         return Matcher6D(cost_bbox=args.set_cost_bbox, 
                          cost_class=args.set_cost_class, 
                          cost_rotation=args.set_cost_rotation,
-                         cost_translation=args.set_cost_translation)
+                         cost_keypoint=args.set_cost_translation)

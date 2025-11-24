@@ -151,8 +151,9 @@ def get_args_parser():
     
     # * Loss coefficients
     # Pose Estimation losses
-    parser.add_argument('--translation_loss_coef', default=1, type=float, help='Loss weighing parameter for the translation')
-    parser.add_argument('--rotation_loss_coef', default=1, type=float, help='Loss weighing parameter for the rotation')
+    parser.add_argument('--translation_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation')
+    parser.add_argument('--keypoint_loss_coef', default=10.0, type=float, help='Loss weighing parameter for the keypoints')
+    parser.add_argument('--rotation_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the rotation')
     # Loss
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
@@ -382,8 +383,8 @@ def main(args):
             eval_epoch = checkpoint['epoch']
         else:
             eval_epoch = None
-        pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
-                      args.rotation_representation, device, args.output_dir, eval_epoch)
+        #pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
+         #             args.rotation_representation, device, args.output_dir, eval_epoch)
         return
     # Evaluate the model for the BOP challenge
     if args.eval_bop:
@@ -485,8 +486,8 @@ def main(args):
             eval_epoch = checkpoint['epoch']
         else:
             eval_epoch = None
-        pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
-                      args.rotation_representation, device, args.output_dir, eval_epoch)
+        #pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
+         #             args.rotation_representation, device, args.output_dir, eval_epoch)
         
         if writer:
             # Validation metrics
@@ -499,18 +500,18 @@ def main(args):
 
     if writer:
         writer.close()
-
-        map_regular = test_stats['coco_eval_bbox'][0]
-        _isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
-        if _isbest:
-            checkpoint_path = output_dir / 'checkpoint_best_regular.pth'
-            utils.save_on_master({
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'args': args,
-            }, checkpoint_path)
+        # TODO: FIx COCO Eval
+        #map_regular = test_stats['coco_eval_bbox'][0]
+        #_isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
+        # if _isbest:
+        #     checkpoint_path = output_dir / 'checkpoint_best_regular.pth'
+        #     utils.save_on_master({
+        #         'model': model_without_ddp.state_dict(),
+        #         'optimizer': optimizer.state_dict(),
+        #         'lr_scheduler': lr_scheduler.state_dict(),
+        #         'epoch': epoch,
+        #         'args': args,
+        #     }, checkpoint_path)
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
                      'epoch': epoch,
@@ -523,8 +524,8 @@ def main(args):
             eval_epoch = checkpoint['epoch']
         else:
             eval_epoch = None
-            pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
-                      args.rotation_representation, device, args.output_dir, eval_epoch)
+            #pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
+             #         args.rotation_representation, device, args.output_dir, eval_epoch)
             log_stats.update({f'ema_test_{k}': v for k,v in ema_test_stats.items()})
             map_ema = ema_test_stats['coco_eval_bbox'][0]
             _isbest = best_map_holder.update(map_ema, epoch, is_ema=True)

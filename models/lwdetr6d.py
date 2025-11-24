@@ -170,7 +170,16 @@ class LWDETR6D(nn.Module):
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
         features, poss = self.backbone(samples)
-
+        # Camera intrinsics (assumed pixels)
+        K = {
+            "cx": 312.9869,
+            "cy": 241.3109,
+            "depth_scale": 0.1,
+            "fx": 1066.778,
+            "fy": 1067.487,
+            "height": 480,
+            "width": 640
+        }
         srcs = []
         masks = []
         for l, feat in enumerate(features):
@@ -201,6 +210,7 @@ class LWDETR6D(nn.Module):
             outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
 
         outputs_class = self.class_embed(hs)
+        # Prepare pred rotation for criterion
         pred_rots = self.dec_rot_head(hs)
         
         if self.training:
@@ -214,46 +224,69 @@ class LWDETR6D(nn.Module):
             rot_c2 =  pred_rots[:, :, :, 3:] - torch.sum(rot_c1 * pred_rots[:, :, :, 3:], dim=3, keepdim=True) * rot_c1
             rot_c2 = rot_c2 / rot_c2.norm(p=2, dim=3, keepdim=True)
 
+
         # Gram-Schmidt representation
         output_rots = torch.cat([rot_c1, rot_c2], dim=3)
+        # Prepare pred translation for criterion
         output_trans = self.dec_trans_head(hs)
-        output_trans_xy = self.dec_trans_xy_head(output_trans)
-        output_trans_z = self.dec_trans_z_head(output_trans)
-        output_trans = torch.cat([output_trans_xy, output_trans_z], dim=3)
+        output_uv_norm = self.dec_trans_xy_head(output_trans).sigmoid()
+        pred_tz = self.dec_trans_z_head(output_trans).relu() + 1e-6
+
+        img_h, img_w = K['height'], K['width']
+        u = output_uv_norm[..., 0:1] * img_w
+        v = output_uv_norm[..., 1:2] * img_h
+        # Unpack Intrinsics (broadcast to match num_queries)
+        fx = K['fx']
+        fy = K['fy']
+        cx = K['cx']
+        cy = K['cy']
+        # Apply Pinhole Formula
+        pred_tx = (u - cx) * pred_tz / fx
+        pred_ty = (v - cy) * pred_tz / fy
+        output_trans = torch.cat([pred_tx, pred_ty, pred_tz], dim=-1)
 
         # Postprocess output_rots for loss
         output_rots = self.process_rotation(output_rots)
         out = {'pred_logits': outputs_class[-1], 
                'pred_boxes': outputs_coord[-1],
                'pred_rotations': output_rots[-1],
-               'pred_translations': output_trans[-1]
+               'pred_translations': output_trans[-1],   
+               'pred_uv_norm': output_uv_norm[-1]  
                }
         
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, 
                                                     outputs_coord, 
                                                     output_rots, 
-                                                    output_trans)
+                                                    output_trans,
+                                                    output_uv_norm)
         
         if self.two_stage:
             hs_enc_list = hs_enc.split(self.num_queries, dim=1)
-            cls_enc, rot_enc_list, trans_enc_list = [], [], []
+            cls_enc, rot_enc_list, trans_enc_list, kpt_enc_list = [], [], [], []
             group_detr = self.group_detr if self.training else 1
             for g_idx in range(group_detr):
                 enc_feat = hs_enc_list[g_idx]
                 cls_enc_gidx = self.transformer.enc_out_class_embed[g_idx](enc_feat)
                 cls_enc.append(cls_enc_gidx)
                 rot_enc_list.append(self.transformer.enc_out_rot_embed[g_idx](enc_feat))      # (B, num_queries, rot_dim)
-                #TODO: Is this correct? We predict trans and put these into xy and z heads separately
+                
+                # TODO: Check if keypoint preds work the here.
                 trans_enc = self.transformer.enc_out_trans_embed[g_idx](enc_feat)  # (B, num_queries, 3)
-                trans_enc_xy = self.transformer.enc_out_trans_xy_embed[g_idx](trans_enc)  # (B, num_queries, 2)
-                trans_enc_z = (self.transformer.enc_out_trans_z_embed[g_idx](trans_enc))  # (B, num_queries, 1)
-                trans_enc_list.append(torch.cat([trans_enc_xy, trans_enc_z], dim=-1))  # (B, num_queries, 3)
+                uv_norm_enc = self.transformer.enc_out_trans_xy_embed[g_idx](trans_enc).sigmoid()  # (B, num_queries, 2)
+                u = uv_norm_enc[..., 0:1] * img_w
+                v = uv_norm_enc[..., 1:2] * img_h
+                trans_enc_z = (self.transformer.enc_out_trans_z_embed[g_idx](trans_enc)).relu() + 1e-6 # (B, num_queries, 1)
+                trans_enc_x = (u - cx) * trans_enc_z / fx
+                trans_enc_y = (v - cy) * trans_enc_z / fy
+                trans_enc = torch.cat([trans_enc_x, trans_enc_y, trans_enc_z], dim=-1)
+                kpt_enc_list.append(uv_norm_enc)
+                trans_enc_list.append(trans_enc)  # (B, num_queries, 3)
             cls_enc = torch.cat(cls_enc, dim=1)
             rot_enc = torch.cat(rot_enc_list, dim=1)            # (B, total_queries, rot_dim)
             # TODO: How do we achive the same as in outputs above?
             trans_enc = torch.cat(trans_enc_list, dim=1)      # (B, total_queries, 3)
-            
+            kpt_enc = torch.cat(kpt_enc_list, dim=1)          # (B, total_queries, 2)
             # What axis are these ?
             rot_c1 = F.normalize(rot_enc[..., :3], dim=-1) 
             rot_c2 = F.normalize(rot_enc[..., 3:] - torch.sum(rot_c1 * rot_enc[..., :3], dim=-1, keepdim=True) * rot_c1, dim=-1) 
@@ -263,7 +296,8 @@ class LWDETR6D(nn.Module):
                 'pred_logits': cls_enc,
                 'pred_boxes': ref_enc,
                 'pred_rotations': rot_enc_full,
-                'pred_translations': trans_enc
+                'pred_translations': trans_enc,
+                'pred_uv_norm': kpt_enc
             }
         return out
 
@@ -289,12 +323,12 @@ class LWDETR6D(nn.Module):
         return outputs_coord, outputs_class
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord, output_rots, output_trans):
+    def _set_aux_loss(self, outputs_class, outputs_coord, output_rots, output_trans, output_uv_norm):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b, 'pred_rotations': c, 'pred_translations': d}
-                for a, b, c, d in zip(outputs_class[:-1], outputs_coord[:-1], output_rots[:-1], output_trans[:-1])]
+        return [{'pred_logits': a, 'pred_boxes': b, 'pred_rotations': c, 'pred_translations': d, 'pred_uv_norm': e}
+                for a, b, c, d, e in zip(outputs_class[:-1], outputs_coord[:-1], output_rots[:-1], output_trans[:-1], output_uv_norm[:-1])]
 
     def update_drop_path(self, drop_path_rate, vit_encoder_num_layers):
         """ """
@@ -362,6 +396,8 @@ class SetCriterion(nn.Module):
         self.mse_loss = nn.MSELoss(reduction="none")
         self.shape_loss = False
         self.warm_up_epochs = 5
+        self.weight_2d = 5.0
+        self.weight_3d = 1.0
 
     ###################PoET no CAD needed#########################
     # Pose losses
@@ -388,7 +424,7 @@ class SetCriterion(nn.Module):
                       outputs,
                       targets, 
                       indices, 
-                      num_boxes=None):
+                      num_boxes):
         """
         Compute the loss related to the rotation of pose estimation represented by a 6d rotation matrix.
         The function calculates the geodesic distance between the predicted and target rotation.
@@ -398,17 +434,14 @@ class SetCriterion(nn.Module):
         eps = 1e-6
         idx = self._get_src_permutation_idx(indices)
         src_rot = outputs["pred_rotations"][idx]
-        # TODO: Check in dataloader which 6d conversion we need here.
-        # Does this loss also work on 6d representations directly?
         tgt_rot = torch.cat([t['relative_rotation'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        n_obj = len(tgt_rot)
 
         product = torch.bmm(src_rot, tgt_rot.transpose(1, 2))
         trace = torch.sum(product[:, torch.eye(3).bool()], 1)
         theta = torch.clamp(0.5 * (trace - 1), -1 + eps, 1 - eps)
         rad = torch.acos(theta)
         losses = {}
-        losses["loss_rot"] = rad.sum() / n_obj
+        losses["loss_rot"] = rad.sum() / num_boxes
         return losses
     ###################PoET Losses#########################
 
@@ -597,7 +630,6 @@ class SetCriterion(nn.Module):
             loss = torch.tensor(0.0, device=pred_rotations.device, requires_grad=True)
         # TODO: Rename this to loss_adds
         return {'loss_rot': loss}
-    
     
     def loss_rot(self, 
                  outputs, 
@@ -998,7 +1030,7 @@ class SetCriterion(nn.Module):
         pred_trans_z = outputs['pred_translations'][idx][:,-1]  # (N, 1)
         tgt_trans_z = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:,-1] # (N, 1)
         tgt_diam = torch.cat([t['diameter'][i] for t, (_, i) in zip(targets, indices)], dim=0)  # (N,) 
-        loss_adds_z = (self.mae_loss(pred_trans_z, tgt_trans_z)*1000.0 / tgt_diam).sum() / num_boxes
+        loss_adds_z = (self.mae_loss(pred_trans_z, tgt_trans_z) * 1000.0 / tgt_diam).sum() / num_boxes
        
         return {'loss_trans_z': loss_adds_z}
     
@@ -1015,8 +1047,7 @@ class SetCriterion(nn.Module):
        
         return {'loss_trans_z': loss_trans_z}
     
-
-    def loss_trans_z_l2(self, outputs, targets, indices, num_boxes=None):
+    def loss_trans_z_l2(self, outputs, targets, indices, num_boxes):
         """
         Compute the loss related to the translation of pose estimation, namely the mean square error (MSE)/ L2 Loss.
         outputs must contain the key 'pred_translation', while targets must contain the key 'relative_position'
@@ -1025,16 +1056,15 @@ class SetCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)
         pred_trans_z = outputs['pred_translations'][idx][:,-1]  # (N, 1)
         tgt_trans_z = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:,-1] # (N, 1)
-        n_obj = len(tgt_trans_z)
+       
 
-        loss_trans_z = F.mse_loss(pred_trans_z, tgt_trans_z, reduction='none')
-        loss_trans_z = torch.sum(loss_trans_z, dim=1)
+        loss_trans_z = F.mse_loss(pred_trans_z, tgt_trans_z, reduction='none') * 1000.0  # (N, 1)
+        loss_trans_z = torch.sum(loss_trans_z)
         loss_trans_z = torch.sqrt(loss_trans_z + 1e-6)  # to avoid NaN
         
-        loss_trans_z = loss_trans_z.sum() / n_obj
+        loss_trans_z = loss_trans_z / num_boxes
         return {'loss_trans_z': loss_trans_z}
     
-
     # Deeper Depth Prediction with Fully Convolutional Residual Networks - BerHu Loss
     # https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=7785097
     def loss_berhu_trans_z(self, 
@@ -1054,8 +1084,31 @@ class SetCriterion(nn.Module):
         else:
             loss_trans_z = ((tgt_trans_z - pred_trans_z)**2 + c**2 / 2*c).sum() / num_boxes
             return {'loss_trans_z': loss_trans_z}
-
-            
+    
+    # Translation in xy in uv coords.
+    def loss_keypoint(self, 
+                    outputs, 
+                    targets, 
+                    indices,
+                    num_boxes):
+        idx = self._get_src_permutation_idx(indices)
+        # Get the predicted Normalized UV for matched queries
+        src_norm_uv = outputs['pred_uv_norm'][idx]
+        tgt_norm_uv = torch.cat([t['object_center_2d'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        loss_kpt = self.mae_loss(src_norm_uv, tgt_norm_uv).sum() / num_boxes
+        return {'loss_keypoint': loss_kpt}
+    
+    def loss_trans_3d(self, 
+                    outputs, 
+                    targets, 
+                    indices,  
+                    num_boxes):
+        idx = self._get_src_permutation_idx(indices)
+        src_trans = outputs['pred_translations'][idx]
+        tgt_trans = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        loss_trans = self.mae_loss(src_trans, tgt_trans).sum() / num_boxes
+        return {'loss_trans_3d': loss_trans}
+    
     def adds_loss(self, 
                   pose_preds, 
                   pose_gt, 
@@ -1133,14 +1186,14 @@ class SetCriterion(nn.Module):
         # Loss weights from paper (empirically tuned)
         lambda_adds = 1.0
         lambda_rot = 1.0
-        lambda_oks = 1.0
-        lambda_ard = 1.0
-        
+        lambda_kpt = 1.0
+        lambda_trans = 1.0
+
         # Compute individual losses
         loss_adds_dict = self.loss_adds(outputs, targets, indices)
-        loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
-        loss_oks_dict = self.loss_oks_vibed(outputs, targets, indices, num_boxes)
-        loss_ard_dict = self.loss_trans_z(outputs, targets, indices, num_boxes)
+        loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+        loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
+        loss_trans_dict = self.loss_trans_3d(outputs, targets, indices, num_boxes)
         #loss_trans_dict = self.loss_translation(outputs, targets, indices)
         #loss_oks_dict = None
         #loss_ard_dict = None
@@ -1149,37 +1202,25 @@ class SetCriterion(nn.Module):
         loss_adds = loss_adds_dict['loss_adds']
         loss_rot = loss_rot_dict['loss_rot']
         #loss_trans = loss_trans_dict['loss_translation']
-        loss_oks = loss_oks_dict['loss_trans_xy']
-        loss_ard = loss_ard_dict['loss_trans_z']
-        
+        loss_kpt = loss_kpt_dict['loss_keypoint']
+        loss_trans = loss_trans_dict['loss_trans_3d']
+
         # Total weighted pose loss
         loss_pose_total = (
             lambda_adds * loss_adds +
             lambda_rot * loss_rot +
-            lambda_oks * loss_oks +
-            lambda_ard * loss_ard
+            lambda_kpt * loss_kpt +
+            lambda_trans * loss_trans
         )
         
-        # loss_pose_total = (
-        #     lambda_adds * loss_adds +
-        #     lambda_rot * loss_rot * 
-        #     1.0 * loss_trans
-        # )
-
         # Return all components for logging
         return {
             'loss_pose': loss_pose_total,
             'loss_rot': loss_rot,
-            'loss_trans_xy': loss_oks,
-            'loss_trans_z': loss_ard,
+            'loss_keypoint': loss_kpt,
+            'loss_trans_3d': loss_trans,
             'loss_adds': loss_adds
         }
-        # return {
-        #         'loss_pose': loss_pose_total,
-        #         'loss_rot': loss_rot,
-        #         'loss_translation': loss_trans,
-        #         'loss_adds': loss_adds
-        #     }
 
     ######################################################
 
@@ -1941,7 +1982,8 @@ def build(args):
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': args.cls_loss_coef, 
                    'loss_bbox': args.bbox_loss_coef, 
-                   'loss_trans': args.translation_loss_coef, 
+                   'loss_trans': args.translation_loss_coef,
+                   'loss_keypoint': args.keypoint_loss_coef,
                    'loss_rot': args.rotation_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
 
