@@ -41,8 +41,9 @@ def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     # Learnining hyperparameters
     parser.add_argument('--lr', default=1e-4, type=float)
-    parser.add_argument('--lr_encoder', default=1.5e-4, type=float) 
+    parser.add_argument('--lr_encoder', default=1.5e-6, type=float) 
     parser.add_argument('--lr_backbone', default=1e-6, type=float) 
+    parser.add_argument('--lr_transformer', default=1e-5, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=12, type=int)
@@ -123,8 +124,8 @@ def get_args_parser():
                         help="giou box coefficient in the matching cost")
     parser.add_argument('--set_cost_rotation', default=1, type=float,
                         help="rotation coefficient in the matching cost")
-    parser.add_argument('--set_cost_translation', default=1, type=float,
-                        help="translation coefficient in the matching cost")
+    parser.add_argument('--set_cost_keypoint', default=10, type=float,
+                        help="keypoint coefficient in the matching cost")
     parser.add_argument('--matcher_type', default='6d', choices=['pose', '6d', 'hungarian'], type=str,
                         help="Type of matcher to use, hungarian is the 3d match from lwdetr and will probably not work")
 
@@ -307,7 +308,7 @@ def main(args):
     # optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, 
     #                               weight_decay=args.weight_decay)
     
-    # TODO Update optimizer.e
+    
     # Separate the parameters
     backbone_params = []
     transformer_params = []
@@ -329,10 +330,10 @@ def main(args):
 
     # Define the Optimizer
     optimizer = torch.optim.AdamW([
-        # Backbone: VERY Slow (Preserve Objects365 knowledge)
-        {'params': backbone_params, 'lr': args.lr_backbone}, 
+        # Backbone: VERY Slow (Preserve Objects365 knowledge from CAEv2)
+        {'params': backbone_params, 'lr': args.lr_encoder}, 
         # Transformer: Slow
-        {'params': transformer_params, 'lr': args.lr_encoder},
+        {'params': transformer_params, 'lr': args.lr_transformer},
         # New Heads: Fast (They are learning from scratch!)
         {'params': new_head_params, 'lr': args.lr} 
         ], weight_decay=args.weight_decay)

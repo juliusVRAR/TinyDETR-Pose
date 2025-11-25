@@ -485,4 +485,4 @@ def build_matcher(args):
         return Matcher6D(cost_bbox=args.set_cost_bbox, 
                          cost_class=args.set_cost_class, 
                          cost_rotation=args.set_cost_rotation,
-                         cost_keypoint=args.set_cost_translation)
+                         cost_keypoint=args.set_cost_keypoint)
