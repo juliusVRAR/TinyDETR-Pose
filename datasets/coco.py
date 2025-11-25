@@ -27,41 +27,45 @@ import datasets.transforms as T
 
 
 class CocoDetection(torchvision.datasets.CocoDetection):
-    def __init__(self, 
-                 img_folder, 
-                 ann_file, 
-                 transforms,
-                 synthetic_background=None,
-                 cache_mode=False, 
-                 local_rank=0, 
-                 local_size=1):
+    def __init__(self, img_folder, ann_file, transforms, split):
         super(CocoDetection, self).__init__(img_folder, ann_file)
         self._transforms = transforms
         self.prepare = ConvertCoco()
-        self.cache_mode = cache_mode
-        self.local_rank = local_rank
-        self.local_size = local_size
-        if cache_mode:
-            self.cache = {}
-            self.cache_images()
-    
+        self.split = split
+        self.img_folder = img_folder
+        
+    def _build_image_path(self, img_dict):
+        """
+        Works for both plain COCO and the YCB-V COCO-style meta-data.
+        """
+        import os
+        if "image_folder" in img_dict:                # -------- YCB-V --------
+            subdir = f"{self.split}"
+            return os.path.join(
+                self.img_folder,
+                subdir,
+                str(img_dict["image_folder"]),
+                "rgb",
+                img_dict["file_name"],
+            )
+        # -------------------------- default COCO -------------------------
+        return os.path.join(self.img_folder, img_dict["file_name"])
+
     def __getitem__(self, idx):
-        img, target = super(CocoDetection, self).__getitem__(idx)
+        from PIL import Image
+        #img, target = super(CocoDetection, self).__getitem__(idx)
         image_id = self.ids[idx]
-        target = {'image_id': image_id, 'annotations': target}
+        img_dict = self.coco.loadImgs(image_id)[0]
+        image_path = self._build_image_path(img_dict)
+        ann_ids = self.coco.getAnnIds(imgIds=[image_id], iscrowd=False)
+        anns    = self.coco.loadAnns(ann_ids)
+        img = Image.open(image_path).convert("RGB")
+        target = {'image_id': image_id, 'annotations': anns}
         img, target = self.prepare(img, target)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
         return img, target
 
-    def cache_images(self):
-        self.cache = {}
-        for index, img_id in zip(tqdm.trange(len(self.ids)), self.ids):
-            if index % self.local_size != self.local_rank:
-                continue
-            path = self.coco.loadImgs(img_id)[0]['file_name']
-            with open(os.path.join(self.root, path), 'rb') as f:
-                self.cache[path] = f.read()
 
 class ConvertCoco(object):
 
@@ -208,6 +212,35 @@ def build(image_set, args):
     
     if square_resize_div_64:
         dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(image_set))
+    else:
+        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set))
+    return dataset
+
+def build_coco_eval(image_set, args):
+    # root = Path("/workspace/LW-DETR/data/")
+    # TODO: Get this from args
+    root = Path("/workspace/LWDETR/", args.dataset_path)
+    assert root.exists(), f'provided COCO path {root} does not exist'
+    mode = 'instances'
+    PATHS = {
+        "val": (root / "ycbv", root / "ycbv" / "annotations" / f'instances_test_bop.json'),
+    }
+    
+    img_folder, ann_file = PATHS[image_set.split("_")[0]]
+    
+    try:
+        square_resize = args.square_resize
+    except:
+        square_resize = False
+    
+    try:
+        square_resize_div_64 = args.square_resize_div_64
+    except:
+        square_resize_div_64 = False
+
+    
+    if square_resize_div_64:
+        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(image_set), split="test")
     else:
         dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set))
     return dataset

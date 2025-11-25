@@ -13,7 +13,7 @@
 import torch.utils.data
 import torchvision
 import data_utils.torchvision_datasets 
-from .coco import build as build_coco
+from .coco import build as build_coco, build_coco_eval
 from .o365 import build_o365
 
 
@@ -28,8 +28,4 @@ def get_coco_api_from_dataset(dataset):
 
 
 def build_dataset(image_set, args):
-    if args.dataset_file == 'coco':
-        return build_coco(image_set, args)
-    if args.dataset_file == 'o365':
-        return build_o365(image_set, args)
-    raise ValueError(f'dataset {args.dataset_file} not supported')
+    return build_coco_eval(image_set, args)
