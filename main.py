@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-from datasets import get_coco_api_from_dataset
+from datasets import get_coco_api_from_dataset, build_dataset as build_dataset_coco
 from data_utils import build_dataset
 from engine import evaluate, train_one_epoch, pose_evaluate, bop_evaluate
 from models import build_model
@@ -36,11 +36,13 @@ from util.utils import ModelEma, BestMetricHolder, clean_state_dict
 from util.benchmark import benchmark
 from evaluation_tools.pose_evaluator_init import build_pose_evaluator
 from torch.utils.tensorboard import SummaryWriter
+
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     # Learnining hyperparameters
     parser.add_argument('--lr', default=1e-4, type=float)
-    parser.add_argument('--lr_encoder', default=1.5e-4, type=float)
+    parser.add_argument('--lr_encoder', default=1.5e-4, type=float) 
+    parser.add_argument('--lr_backbone', default=1e-6, type=float) 
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=12, type=int)
@@ -194,7 +196,8 @@ def get_args_parser():
     parser.add_argument('--checkpoint_interval', default=1, type=int,
                         help='epoch interval to save checkpoint')
     parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--resume', default='', type=str, 
+                        help='resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
@@ -244,10 +247,10 @@ def get_args_parser():
     parser.add_argument('--skip_coco_eval', action='store_true',
                         help='Skip box/coco evaluation, run pose only')
 
+
     # subparsers
     subparsers = parser.add_subparsers(title='sub-commands', dest='subcommand',
         description='valid subcommands', help='additional help')
-
     # subparser for export model
     parser_export = subparsers.add_parser('export_model', help='LWDETR model export')
     parser_export.add_argument('--shape', type=int, nargs=2, default=(640, 640), help="input shape (width, height)")
@@ -300,14 +303,47 @@ def main(args):
     print('number of params:', n_parameters)
     param_dicts = get_param_dict(args, model_without_ddp)
 
-    # TODO: Muon optimizer testing for larger models
-    optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, 
-                                  weight_decay=args.weight_decay)
+    # Check if they 
+    # optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, 
+    #                               weight_decay=args.weight_decay)
+    
+    # TODO Update optimizer.e
+    # Separate the parameters
+    backbone_params = []
+    transformer_params = []
+    new_head_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+            
+        if "backbone" in name:
+            # The Pretrained ViT
+            backbone_params.append(param)
+        elif "transformer" in name:
+            # The Pretrained Transformer Decoder
+            transformer_params.append(param)
+        else:
+            # Your New Heads (Class, Box, Z, XY, Rot)
+            new_head_params.append(param)
+
+    # Define the Optimizer
+    optimizer = torch.optim.AdamW([
+        # Backbone: VERY Slow (Preserve Objects365 knowledge)
+        {'params': backbone_params, 'lr': args.lr_backbone}, 
+        # Transformer: Slow
+        {'params': transformer_params, 'lr': args.lr_encoder},
+        # New Heads: Fast (They are learning from scratch!)
+        {'params': new_head_params, 'lr': args.lr} 
+        ], weight_decay=args.weight_decay)
+    
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
     
     # Build the dataset for training and validation
     dataset_train = build_dataset(image_set=args.train_set, args=args)
     dataset_val = build_dataset(image_set=args.eval_set, args=args)
+    dataset_val_coco = build_dataset_coco(image_set='val', args=args)
+
     if args.distributed:
         sampler_train = DistributedSampler(dataset_train)
         sampler_val = DistributedSampler(dataset_val, shuffle=False)
@@ -323,8 +359,14 @@ def main(args):
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, 
                                  num_workers=args.num_workers)
-    base_ds = get_coco_api_from_dataset(dataset_val)
     
+    data_loader_val_coco = DataLoader(dataset_val_coco, args.batch_size, sampler=sampler_val,
+                                drop_last=False, collate_fn=utils.collate_fn, 
+                                num_workers=args.num_workers)
+
+
+    base_ds = get_coco_api_from_dataset(dataset_val_coco)
+
    
     if args.pretrain_weights is not None:
         checkpoint = torch.load(args.pretrain_weights, map_location='cpu')
@@ -393,19 +435,6 @@ def main(args):
                      args.rotation_representation, device, args.output_dir, args.dataset)
         return
 
-    if args.calibrate:
-        # Freeze all model weights except for the aleatoric uncertainty heads
-        print("Freezing all model weights except for the aleatoric uncertainty heads.")
-        for name, param in model.transformer.named_parameters():
-            param.requires_grad = False
-        for name, param in model.input_proj.named_parameters():
-            param.requires_grad = False
-        for name, param in model.translation_head.named_parameters():
-            param.requires_grad = False
-        for name, param in model.rotation_head.named_parameters():
-            param.requires_grad = False
-
-
 
     # for drop
     total_batch_size = args.batch_size * utils.get_world_size()
@@ -422,7 +451,7 @@ def main(args):
             args.drop_path, args.epochs, num_training_steps_per_epoch,
             args.cutoff_epoch, args.drop_mode, args.drop_schedule)
         print("Min DP = %.7f, Max DP = %.7f" % (min(schedules['dp']), max(schedules['dp'])))
-
+    assert args.start_epoch - args.epochs !=0, "start_epoch should be less than epochs"
     print("Start training")
     start_time = time.time()
     best_map_holder = BestMetricHolder(use_ema=args.use_ema)
@@ -431,19 +460,19 @@ def main(args):
         if args.distributed:
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
-            model, 
-            criterion, 
-            data_loader_train, 
-            optimizer, 
-            device, 
-            epoch,
-            args.clip_max_norm, 
-            ema_m=ema_m, 
-            schedules=schedules, 
-            num_training_steps_per_epoch=num_training_steps_per_epoch,
-            vit_encoder_num_layers=args.vit_encoder_num_layers, 
-            args=args, 
-            writer=writer)
+                                    model, 
+                                    criterion, 
+                                    data_loader_train, 
+                                    optimizer, 
+                                    device, 
+                                    epoch,
+                                    args.clip_max_norm, 
+                                    ema_m=ema_m, 
+                                    schedules=schedules, 
+                                    num_training_steps_per_epoch=num_training_steps_per_epoch,
+                                    vit_encoder_num_layers=args.vit_encoder_num_layers, 
+                                    args=args, 
+                                    writer=writer)
         # TensorBoard logging
         # Per-epoch scalars
         if writer:
@@ -480,7 +509,7 @@ def main(args):
                 utils.save_on_master(weights, checkpoint_path)
 
         test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args=args
+            model, criterion, postprocessors, data_loader_val_coco, base_ds, device, args=args
         )
         if args.resume:
             eval_epoch = checkpoint['epoch']
@@ -500,18 +529,17 @@ def main(args):
 
     if writer:
         writer.close()
-        # TODO: FIx COCO Eval
-        #map_regular = test_stats['coco_eval_bbox'][0]
-        #_isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
-        # if _isbest:
-        #     checkpoint_path = output_dir / 'checkpoint_best_regular.pth'
-        #     utils.save_on_master({
-        #         'model': model_without_ddp.state_dict(),
-        #         'optimizer': optimizer.state_dict(),
-        #         'lr_scheduler': lr_scheduler.state_dict(),
-        #         'epoch': epoch,
-        #         'args': args,
-        #     }, checkpoint_path)
+        map_regular = test_stats['coco_eval_bbox'][0]
+        _isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
+        if _isbest:
+            checkpoint_path = output_dir / 'checkpoint_best_regular.pth'
+            utils.save_on_master({
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': epoch,
+                'args': args,
+            }, checkpoint_path)
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
                      'epoch': epoch,
