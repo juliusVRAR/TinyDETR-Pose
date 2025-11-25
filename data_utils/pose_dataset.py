@@ -403,6 +403,8 @@ class ProcessPoseData(object):
             if 'position' in anno[0]['relative_pose']:
                 rel_position = [obj["relative_pose"]['position'] for obj in anno]
                 rel_position = torch.tensor(rel_position, dtype=torch.float32)
+                trans_z = rel_position[:, 2].unsqueeze(1)  # (N,1)
+
             if 'quaternions' in anno[0]['relative_pose']:
                 rel_quaternion = [obj["relative_pose"]['quaternions'] for obj in anno]
                 rel_quaternion = torch.tensor(rel_quaternion, dtype=torch.float32)
@@ -493,6 +495,8 @@ class ProcessPoseData(object):
             target["object_rotation_w"] = obj_rotation
         if rel_position is not None:
             target["relative_position"] = rel_position
+            #target["Z_LIMIT"] = 2.5 # For ycbv dataset we set a fixed z limit of 2.5 meters
+            target["relative_translation_z"] = rel_position[:, 2] / 2.5 # Normalized Depth #TODO: Put into targets to use later in Criterion
         if rel_quaternion is not None:
             target["relative_quaternions"] = rel_quaternion
         if rel_rotation is not None:
