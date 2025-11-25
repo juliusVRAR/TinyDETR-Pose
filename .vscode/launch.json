@@ -59,10 +59,11 @@
       // },
       "args": [
         "--lr","1e-4",
-        "--lr_encoder","1.5e-4",
-        "--batch_size","4",
+        "--lr_encoder","1e-5",
+        "--lr_backbone", "1e-6",
+        "--batch_size","24",
         "--weight_decay","1e-4",
-        "--epochs","2",
+        "--epochs","10",
         "--lr_drop","60",
         "--lr_vit_layer_decay","0.8",
         "--lr_component_decay","0.7",
@@ -88,7 +89,7 @@
         "--dataset_path","data/datasets/bop",
         "--square_resize_div_64",
         "--use_ema",
-        "--pretrain_keys_modify_to_load",
+        "--pretrain_keys_modify_to_load", // We can use this instead of the function in the build lwdetr6d
           "transformer.enc_out_class_embed.0.weight",
           "transformer.enc_out_class_embed.1.weight",
           "transformer.enc_out_class_embed.2.weight",
@@ -122,7 +123,10 @@
         "--grayscale",
         "--rgb_augmentation",
         "--tensorboard",
-        "--mosaic"
+        "--matcher_type", "6d",
+        //"--resume", "output/checkpoint0009_new.pth",
+        //"--pretrain_weights", "data/weights/LWDETR_tiny_30e_objects365.pth" TODO: Fix this so we can load coco as well as obj365
+
       ]
     },
     {
@@ -133,13 +137,13 @@
       "console": "integratedTerminal",
       "args": [
         "--eval_only",
-        "--resume", "output/checkpoint0000_new.pth",
+        "--resume", "output/checkpoint0009_new.pth",
         "--dataset_file", "ycbv",
         "--eval_set", "test",
         "--rotation_representation", "6d",
-        "--eval_batches", "5",
+        "--eval_batches", "0",
         "--output_dir", "output",
-        "--batch_size", "4",
+        "--batch_size", "16",
         "--encoder", "vit_tiny",
         "--vit_encoder_num_layers", "6",
         "--window_block_indexes", "0", "2", "4",
