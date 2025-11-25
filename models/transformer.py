@@ -170,7 +170,7 @@ class Transformer(nn.Module):
         # Determine Translation and Rotation head output dimension
         self.t_dim = 3 #xyz
         self.xy_dim = 2 # xy
-        self.z_dim = 1 # z
+        self.z_dim = 2 # z
         # Alternative use the YOLOX6D approach they split translation into 2D center (xy) + depth (z)
         if self.rotation_mode == '6d':
             self.rot_dim = 6 # GramSchmidt

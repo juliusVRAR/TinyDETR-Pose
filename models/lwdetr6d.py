@@ -19,6 +19,7 @@ LW-DETR model and criterion classes
 import copy
 import math
 from typing import Callable
+from pyparsing import Path
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -88,7 +89,8 @@ class LWDETR6D(nn.Module):
         # Determine Translation and Rotation head output dimension
         self.t_dim = 3
         self.xy_dim = 2
-        self.z_dim = 1
+        self.z_dim = 2
+        self.max_depth = 2.5 # TODO: derive from dataset / input
         if self.rotation_mode == '6d':
             self.rot_dim = 6 # GramSchmidt
         else:
@@ -114,6 +116,7 @@ class LWDETR6D(nn.Module):
                                     hidden_dim=hidden_dim, 
                                     output_dim=self.z_dim, 
                                     num_layers=1)
+    
         ############################################
 
         # init prior_prob setting for focal loss
@@ -143,7 +146,7 @@ class LWDETR6D(nn.Module):
                 [copy.deepcopy(self.dec_trans_z_head) for _ in range(group_detr)])
 
         self._export = False
-
+    
     def export(self):
         self._export = True
         self._forward_origin = self.forward
@@ -151,7 +154,65 @@ class LWDETR6D(nn.Module):
         for name, m in self.named_modules():
             if hasattr(m, "export") and isinstance(m.export, Callable) and hasattr(m, "_export") and not m._export:
                 m.export()
+    
+    def init_pose_heads(self):
+        """
+        Manually initializes the prediction heads to prevent training collapse.
+        Call this AFTER loading pretrained backbone weights.
+        """
+        import torch.nn as nn
 
+        # --- Helper Function ---
+        # Detects if your head is a simple nn.Linear, nn.Sequential, or the custom MLP class
+        def get_last_linear_layer(module):
+            if hasattr(module, 'layers'):  # Standard DETR MLP class uses .layers
+                return module.layers[-1]
+            elif isinstance(module, nn.Sequential):
+                return module[-1]
+            elif isinstance(module, nn.Linear):
+                return module
+            else:
+                raise ValueError(f"Unknown head structure: {type(module)}")
+
+        print(">> Running Manual Pose Head Initialization...")
+
+        # ---------------------------------------------------------
+        # 1. Initialize Z-Head (Depth + Uncertainty)
+        # ---------------------------------------------------------
+        z_layer = get_last_linear_layer(self.dec_trans_z_head)
+        
+        # Channel 0: Normalized Depth (Sigmoid output)
+        # Setting bias to 0.0 -> Sigmoid(0.0) = 0.5
+        # 0.5 * Max_Depth (2.5m) = 1.25m (Safe mean guess for YCB-V)
+        nn.init.constant_(z_layer.bias[0], 0.0)
+        
+        # Channel 1: Log Uncertainty 's' (Linear output)
+        # Setting bias to 2.0 -> Variance = exp(2.0) = 7.38
+        # This tells the model: "I am very uncertain, dampen the gradients."
+        nn.init.constant_(z_layer.bias[1], 2.0)
+        
+        # ---------------------------------------------------------
+        # 2. Initialize XY-Head (Visual Center)
+        # ---------------------------------------------------------
+        xy_layer = get_last_linear_layer(self.dec_trans_xy_head)
+        
+        # Setting bias to 0.0 -> Sigmoid(0.0) = 0.5
+        # This places the initial prediction at the center of the image crop.
+        nn.init.constant_(xy_layer.bias, 0.0)
+
+        # ---------------------------------------------------------
+        # 3. Initialize Rotation Head (6D Continuous)
+        # ---------------------------------------------------------
+        rot_layer = get_last_linear_layer(self.dec_rot_head)
+        
+        # Weights: Make them very small so output vectors are small numbers.
+        # This prevents large initial rotations that confuse the matcher.
+        nn.init.xavier_uniform_(rot_layer.weight, gain=0.01)
+        
+        # Bias: Zero (Neutral)
+        nn.init.constant_(rot_layer.bias, 0.0)
+        
+        print(">> Pose Heads Initialized: Z-Uncertainty set high, XY centered.")
     def forward(self, samples: NestedTensor, targets=None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
@@ -230,7 +291,15 @@ class LWDETR6D(nn.Module):
         # Prepare pred translation for criterion
         output_trans = self.dec_trans_head(hs)
         output_uv_norm = self.dec_trans_xy_head(output_trans).sigmoid()
-        pred_tz = self.dec_trans_z_head(output_trans).relu() + 1e-6
+        
+        # Prepare pred translation z for monocular depth estimation.
+        z_out = self.dec_trans_z_head(output_trans)
+        # Split the output:
+        # Channel 0: Normalized Depth (Sigmoid -> 0 to 1)
+        output_norm_z = z_out[..., 0].sigmoid()
+        # Channel 1: Uncertainty (Log Variance) - No activation needed
+        output_z_log_var = z_out[..., 1]
+        pred_tz = output_norm_z * self.max_depth # Pred z in meters
 
         img_h, img_w = K['height'], K['width']
         u = output_uv_norm[..., 0:1] * img_w
@@ -240,10 +309,10 @@ class LWDETR6D(nn.Module):
         fy = K['fy']
         cx = K['cx']
         cy = K['cy']
-        # Apply Pinhole Formula
-        pred_tx = (u - cx) * pred_tz / fx
-        pred_ty = (v - cy) * pred_tz / fy
-        output_trans = torch.cat([pred_tx, pred_ty, pred_tz], dim=-1)
+        # Apply Pinhole Formula to get x,y in meters
+        pred_tx = (u - cx) * pred_tz.unsqueeze(-1) / fx
+        pred_ty = (v - cy) * pred_tz.unsqueeze(-1) / fy
+        output_trans = torch.cat([pred_tx, pred_ty, pred_tz.unsqueeze(-1)], dim=-1)
 
         # Postprocess output_rots for loss
         output_rots = self.process_rotation(output_rots)
@@ -251,7 +320,9 @@ class LWDETR6D(nn.Module):
                'pred_boxes': outputs_coord[-1],
                'pred_rotations': output_rots[-1],
                'pred_translations': output_trans[-1],   
-               'pred_uv_norm': output_uv_norm[-1]  
+               'pred_uv_norm': output_uv_norm[-1],
+               'pred_trans_z': output_norm_z[-1],            # Normalized z input for Laplacian Loss 
+               'pred_z_log_var': output_z_log_var[-1],      # Input for Laplacian Loss
                }
         
         if self.aux_loss:
@@ -259,11 +330,14 @@ class LWDETR6D(nn.Module):
                                                     outputs_coord, 
                                                     output_rots, 
                                                     output_trans,
-                                                    output_uv_norm)
-        
+                                                    output_uv_norm,
+                                                    output_norm_z,
+                                                    output_z_log_var
+                                                    )
+
         if self.two_stage:
             hs_enc_list = hs_enc.split(self.num_queries, dim=1)
-            cls_enc, rot_enc_list, trans_enc_list, kpt_enc_list = [], [], [], []
+            cls_enc, rot_enc_list, trans_enc_list, kpt_enc_list, log_var_z_list, trans_enc_z_list = [], [], [], [], [], []
             group_detr = self.group_detr if self.training else 1
             for g_idx in range(group_detr):
                 enc_feat = hs_enc_list[g_idx]
@@ -276,16 +350,29 @@ class LWDETR6D(nn.Module):
                 uv_norm_enc = self.transformer.enc_out_trans_xy_embed[g_idx](trans_enc).sigmoid()  # (B, num_queries, 2)
                 u = uv_norm_enc[..., 0:1] * img_w
                 v = uv_norm_enc[..., 1:2] * img_h
-                trans_enc_z = (self.transformer.enc_out_trans_z_embed[g_idx](trans_enc)).relu() + 1e-6 # (B, num_queries, 1)
-                trans_enc_x = (u - cx) * trans_enc_z / fx
-                trans_enc_y = (v - cy) * trans_enc_z / fy
-                trans_enc = torch.cat([trans_enc_x, trans_enc_y, trans_enc_z], dim=-1)
+                # Prepare pred translation z for monocular depth estimation.
+                z_out_enc = (self.transformer.enc_out_trans_z_embed[g_idx](trans_enc))
+                # Split the output:
+                # Channel 0: Normalized Depth (Sigmoid -> 0 to 1)
+                norm_z_enc = z_out_enc[..., 0].sigmoid()
+                # Channel 1: Uncertainty (Log Variance) - No activation needed
+                z_log_var_enc = z_out_enc[..., 1]
+                trans_enc_z = norm_z_enc * self.max_depth # Pred z in meters
+
+
+                trans_enc_x = (u - cx) * trans_enc_z.unsqueeze(-1)  / fx
+                trans_enc_y = (v - cy) * trans_enc_z.unsqueeze(-1)  / fy
+                trans_enc = torch.cat([trans_enc_x, trans_enc_y, trans_enc_z.unsqueeze(-1)], dim=-1)
                 kpt_enc_list.append(uv_norm_enc)
-                trans_enc_list.append(trans_enc)  # (B, num_queries, 3)
+                trans_enc_list.append(trans_enc)  # (B, num_queries, 2)
+                log_var_z_list.append(z_log_var_enc)
+                trans_enc_z_list.append(trans_enc_z)
             cls_enc = torch.cat(cls_enc, dim=1)
             rot_enc = torch.cat(rot_enc_list, dim=1)            # (B, total_queries, rot_dim)
             # TODO: How do we achive the same as in outputs above?
             trans_enc = torch.cat(trans_enc_list, dim=1)      # (B, total_queries, 3)
+            z_log_var_enc = torch.cat(log_var_z_list, dim=1)  # (B, total_queries, 1)
+            trans_enc_z = torch.cat(trans_enc_z_list, dim=1)  # (B, total_queries, 1)
             kpt_enc = torch.cat(kpt_enc_list, dim=1)          # (B, total_queries, 2)
             # What axis are these ?
             rot_c1 = F.normalize(rot_enc[..., :3], dim=-1) 
@@ -297,7 +384,9 @@ class LWDETR6D(nn.Module):
                 'pred_boxes': ref_enc,
                 'pred_rotations': rot_enc_full,
                 'pred_translations': trans_enc,
-                'pred_uv_norm': kpt_enc
+                'pred_uv_norm': kpt_enc,
+                'pred_z_log_var': z_log_var_enc,
+                'pred_trans_z': trans_enc_z
             }
         return out
 
@@ -323,12 +412,25 @@ class LWDETR6D(nn.Module):
         return outputs_coord, outputs_class
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord, output_rots, output_trans, output_uv_norm):
+    def _set_aux_loss(self, outputs_class, outputs_coord, output_rots, output_trans, output_uv_norm, output_z_log_var, output_trans_z):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b, 'pred_rotations': c, 'pred_translations': d, 'pred_uv_norm': e}
-                for a, b, c, d, e in zip(outputs_class[:-1], outputs_coord[:-1], output_rots[:-1], output_trans[:-1], output_uv_norm[:-1])]
+        return [{'pred_logits': a, 
+                 'pred_boxes': b, 
+                 'pred_rotations': c, 
+                 'pred_translations': d, 
+                 'pred_uv_norm': e, 
+                 'pred_z_log_var': f, 
+                 'pred_trans_z': g}
+
+                for a, b, c, d, e, f, g in zip(outputs_class[:-1], 
+                                               outputs_coord[:-1], 
+                                               output_rots[:-1], 
+                                               output_trans[:-1], 
+                                               output_uv_norm[:-1], 
+                                               output_z_log_var[:-1], 
+                                               output_trans_z[:-1])]
 
     def update_drop_path(self, drop_path_rate, vit_encoder_num_layers):
         """ """
@@ -396,6 +498,7 @@ class SetCriterion(nn.Module):
         self.mse_loss = nn.MSELoss(reduction="none")
         self.shape_loss = False
         self.warm_up_epochs = 5
+        # TODO: These multipliers are in the args.
         self.weight_2d = 5.0
         self.weight_3d = 1.0
 
@@ -645,7 +748,7 @@ class SetCriterion(nn.Module):
        
         return {'loss_trans_z': loss_adds_z}
     
-    def loss_trans_z(self, 
+    def loss_trans_z_yolo6d(self, 
                     outputs, 
                     targets, 
                     indices,  
@@ -708,19 +811,46 @@ class SetCriterion(nn.Module):
         tgt_norm_uv = torch.cat([t['object_center_2d'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         loss_kpt = self.mae_loss(src_norm_uv, tgt_norm_uv).sum() / num_boxes
         return {'loss_keypoint': loss_kpt}
+
+    # L1 Loss for translation in x,y
+    def loss_trans_xy(self, 
+                      outputs, 
+                      targets, 
+                      indices,  
+                      num_boxes):
+        idx = self._get_src_permutation_idx(indices)
+        src_trans = outputs['pred_translations'][idx]
+        tgt_trans = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        # Only consider x,y components (L1 loss)
+        loss_trans = self.mae_loss(src_trans[:, :2], tgt_trans[:, :2]).sum() / num_boxes
+        return {'loss_trans_xy': loss_trans}
     
-    def loss_trans_3d(self, 
+    # Laplacian Aleatoric Loss for translation in z
+    def loss_trans_z(self, 
                     outputs, 
                     targets, 
                     indices,  
                     num_boxes):
+        
         idx = self._get_src_permutation_idx(indices)
-        src_trans = outputs['pred_translations'][idx]
-        tgt_trans = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        loss_trans = self.mae_loss(src_trans, tgt_trans).sum() / num_boxes
-        return {'loss_trans_3d': loss_trans}
-    
-    def adds_loss(self, 
+        # 1. Get Predictions (Specific to Z and Uncertainty)
+        # We use the Normalized Z (0-1) for stability
+        src_norm_z = outputs['pred_trans_z'][idx] # Normalized between 0-1
+        # Get the Log Variance (s)
+        src_log_var = outputs['pred_z_log_var'][idx]
+        # safety guardrail because we are useing exp(-s) -> can explode/NaN
+        src_log_var = torch.clamp(src_log_var, min=-10.0, max=10.0)
+        # 2. Get Targets (Meters)
+        # Extract the full translation vector from targets
+        tgt_trans_z = torch.cat([t['relative_translation_z'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        # 4. Compute Laplacian Loss
+        # Formula: L = |y - y_hat| * exp(-s) + s
+        l1_error = torch.abs(src_norm_z - tgt_trans_z)
+        loss = (l1_error * torch.exp(-src_log_var)) + src_log_var
+        loss = loss.sum() / num_boxes
+        
+        return {'loss_trans_z': loss}
+    def adds_loss(self,
                   pose_preds, 
                   pose_gt, 
                   cls_targets, 
@@ -798,27 +928,31 @@ class SetCriterion(nn.Module):
         lambda_adds = 1.0 # Gemini says this should be less: # Start small! This loss can be large in magnitude. 0.1 
         lambda_rot = 1.0
         lambda_kpt = 1.0
-        lambda_trans = 1.0
+        lambda_trans_xy = 1.0
+        lambda_trans_z = 1.0
 
         # Compute individual losses
         loss_adds_dict = self.loss_adds(outputs, targets, indices)
         loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
         loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
-        loss_trans_dict = self.loss_trans_3d(outputs, targets, indices, num_boxes)
+        loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
+        loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
         
         # Extract loss values
         loss_adds = loss_adds_dict['loss_adds']
         loss_rot = loss_rot_dict['loss_rot']
         #loss_trans = loss_trans_dict['loss_translation']
         loss_kpt = loss_kpt_dict['loss_keypoint']
-        loss_trans = loss_trans_dict['loss_trans_3d']
+        loss_trans_xy = loss_trans_xy['loss_trans_xy']
+        loss_trans_z = loss_trans_z['loss_trans_z']
 
         # Total weighted pose loss
         loss_pose_total = (
             lambda_adds * loss_adds +
             lambda_rot * loss_rot +
             lambda_kpt * loss_kpt +
-            lambda_trans * loss_trans
+            lambda_trans_z * loss_trans_z +
+            lambda_trans_xy * loss_trans_xy
         )
         
         # Return all components for logging
@@ -826,7 +960,8 @@ class SetCriterion(nn.Module):
             'loss_pose': loss_pose_total,
             'loss_rot': loss_rot,
             'loss_keypoint': loss_kpt,
-            'loss_trans_3d': loss_trans,
+            'loss_trans_xy': loss_trans_xy,
+            'loss_trans_z': loss_trans_z,
             'loss_adds': loss_adds
         }
 
@@ -1555,8 +1690,48 @@ class MLP(nn.Module):
         for i, layer in enumerate(self.layers):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
+    
+def load_pretrained_weights(model, ckpt_path):
+        print(f"Loading weights from {ckpt_path}...")
+        checkpoint = torch.load(ckpt_path, map_location='cpu')
 
+        # Unpack state_dict
+        if 'model' in checkpoint:
+            pretrained_dict = checkpoint['model']
+        elif 'state_dict' in checkpoint:
+            pretrained_dict = checkpoint['state_dict']
+        else:
+            pretrained_dict = checkpoint
+            
+        model_dict = model.state_dict()
+        
+        # --- SURGERY STEP ---
+        # We create a new dict containing ONLY the keys that match 
+        # in both Name AND Shape.
+        
+        pretrained_dict_filtered = {
+            k: v for k, v in pretrained_dict.items()
+            if k in model_dict and model_dict[k].shape == v.shape
+        }
+        
+        # Check what we are dropping (Mental check)
+        dropped_keys = [k for k in pretrained_dict.keys() if k not in pretrained_dict_filtered]
+        print(f"Dropped {len(dropped_keys)} keys (mismatched heads/layers).")
+        
+        # Specific check: Ensure Class Head was dropped
+        # (Because Objects365 has 365 classes, you have 21)
+        if any("class_embed" in k for k in dropped_keys):
+            print(">> Success: Old Classification Head was removed.")
+        else:
+            print(">> Warning: Class head might have been loaded? Check shapes!")
 
+        # Update the current model
+        model_dict.update(pretrained_dict_filtered)
+        
+        # Load with strict=False (allows missing keys for your new Z-head/Rot-head)
+        model.load_state_dict(model_dict, strict=False)
+        print("Weights loaded successfully.")
+    
 def build(args):
     # the `num_classes` naming here is somewhat misleading.
     # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
@@ -1587,6 +1762,12 @@ def build(args):
         bbox_reparam=args.bbox_reparam,
         rotation_mode="6d",
     )
+    load_pretrained_weights(model, "/workspace/LWDETR/data/weights/LWDETR_tiny_30e_objects365.pth")
+    if  args.resume is None:
+        model.init_pose_heads()
+    else: 
+        print(f"Continue training at {args.resume}")
+    print("Z-Head Bias:", model.dec_trans_z_head.layers[-1].bias.data) 
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': args.cls_loss_coef, 
                    'loss_bbox': args.bbox_loss_coef, 
