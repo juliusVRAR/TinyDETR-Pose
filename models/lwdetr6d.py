@@ -18,6 +18,7 @@ LW-DETR model and criterion classes
 """
 import copy
 import math
+
 from typing import Callable
 from pyparsing import Path
 import torch
@@ -211,7 +212,13 @@ class LWDETR6D(nn.Module):
         
         # Bias: Zero (Neutral)
         nn.init.constant_(rot_layer.bias, 0.0)
+        # prior_prob = 0.01
+        # bias_value = -math.log((1 - prior_prob) / prior_prob)
+        # nn.init.constant_(self.class_head.bias, bias_value)
+        # OR simply: 
+        nn.init.constant_(self.class_head.bias, -4.6)
         
+        print(f">> Class Head initialized with bias -4.6 (Prob 0.01)")
         print(">> Pose Heads Initialized: Z-Uncertainty set high, XY centered.")
     def forward(self, samples: NestedTensor, targets=None):
         """ The forward expects a NestedTensor, which consists of:
@@ -1692,46 +1699,43 @@ class MLP(nn.Module):
         return x
     
 def load_pretrained_weights(model, ckpt_path):
-        print(f"Loading weights from {ckpt_path}...")
-        checkpoint = torch.load(ckpt_path, map_location='cpu')
 
-        # Unpack state_dict
-        if 'model' in checkpoint:
-            pretrained_dict = checkpoint['model']
-        elif 'state_dict' in checkpoint:
-            pretrained_dict = checkpoint['state_dict']
-        else:
-            pretrained_dict = checkpoint
-            
-        model_dict = model.state_dict()
-        
-        # --- SURGERY STEP ---
-        # We create a new dict containing ONLY the keys that match 
-        # in both Name AND Shape.
-        
-        pretrained_dict_filtered = {
-            k: v for k, v in pretrained_dict.items()
-            if k in model_dict and model_dict[k].shape == v.shape
-        }
-        
-        # Check what we are dropping (Mental check)
-        dropped_keys = [k for k in pretrained_dict.keys() if k not in pretrained_dict_filtered]
-        print(f"Dropped {len(dropped_keys)} keys (mismatched heads/layers).")
-        
-        # Specific check: Ensure Class Head was dropped
-        # (Because Objects365 has 365 classes, you have 21)
-        if any("class_embed" in k for k in dropped_keys):
-            print(">> Success: Old Classification Head was removed.")
-        else:
-            print(">> Warning: Class head might have been loaded? Check shapes!")
+    print(f"Loading weights from {ckpt_path}...")
+    checkpoint = torch.load(ckpt_path, map_location='cpu')
 
-        # Update the current model
-        model_dict.update(pretrained_dict_filtered)
+    # Unpack state_dict
+    if 'model' in checkpoint:
+        pretrained_dict = checkpoint['model']
+    elif 'state_dict' in checkpoint:
+        pretrained_dict = checkpoint['state_dict']
+    else:
+        pretrained_dict = checkpoint
         
-        # Load with strict=False (allows missing keys for your new Z-head/Rot-head)
-        model.load_state_dict(model_dict, strict=False)
-        print("Weights loaded successfully.")
+    model_dict = model.state_dict()
     
+    # --- SURGERY STEP ---
+    # We create a new dict containing ONLY the keys that match 
+    # in both Name AND Shape.
+    
+    pretrained_dict_filtered = {
+        k: v for k, v in pretrained_dict.items()
+        if k in model_dict and model_dict[k].shape == v.shape
+    }
+    
+    # Check what we are dropping (Mental check)
+    dropped_keys = [k for k in pretrained_dict.keys() if k not in pretrained_dict_filtered]
+    print(f"Dropped {len(dropped_keys)} keys (mismatched heads/layers).")
+    
+    # Specific check: Ensure Class Head was dropped
+    # (Because Objects365 has 365 classes, you have 21)
+    if any("class_embed" in k for k in dropped_keys):
+        print(">> Success: Old Classification Head was removed.")
+    else:
+        print(">> Warning: Class head might have been loaded? Check shapes!")
+
+    # Update the current model
+    model_dict.update(pretrained_dict_filtered)
+
 def build(args):
     # the `num_classes` naming here is somewhat misleading.
     # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
@@ -1762,7 +1766,7 @@ def build(args):
         bbox_reparam=args.bbox_reparam,
         rotation_mode="6d",
     )
-    load_pretrained_weights(model, "/workspace/LWDETR/data/weights/LWDETR_tiny_30e_objects365.pth")
+    load_pretrained_weights(model, Path(args.pretrain_weights))
     if  args.resume is None:
         model.init_pose_heads()
     else: 

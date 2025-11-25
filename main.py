@@ -369,26 +369,26 @@ def main(args):
     base_ds = get_coco_api_from_dataset(dataset_val_coco)
 
    
-    if args.pretrain_weights is not None:
-        checkpoint = torch.load(args.pretrain_weights, map_location='cpu')
-        # add support to exclude_keys
-        # e.g., when load object365 pretrain, do not load `class_embed.[weight, bias]`
-        if args.pretrain_exclude_keys is not None:
-            assert isinstance(args.pretrain_exclude_keys, list)
-            for exclude_key in args.pretrain_exclude_keys:
-                checkpoint['model'].pop(exclude_key)
-        if args.pretrain_keys_modify_to_load is not None:
-            from util.obj365_to_coco_model import get_coco_pretrain_from_obj365
-            assert isinstance(args.pretrain_keys_modify_to_load, list)
-            for modify_key_to_load in args.pretrain_keys_modify_to_load:
-                checkpoint['model'][modify_key_to_load] = get_coco_pretrain_from_obj365(
-                    model_without_ddp.state_dict()[modify_key_to_load],
-                    checkpoint['model'][modify_key_to_load]
-                )
-        model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
-        if args.use_ema:
-            del ema_m
-            ema_m = ModelEma(model_without_ddp)
+    # if args.pretrain_weights is not None:
+    #     checkpoint = torch.load(args.pretrain_weights, map_location='cpu')
+    #     # add support to exclude_keys
+    #     # e.g., when load object365 pretrain, do not load `class_embed.[weight, bias]`
+    #     if args.pretrain_exclude_keys is not None:
+    #         assert isinstance(args.pretrain_exclude_keys, list)
+    #         for exclude_key in args.pretrain_exclude_keys:
+    #             checkpoint['model'].pop(exclude_key)
+    #     if args.pretrain_keys_modify_to_load is not None:
+    #         from util.obj365_to_coco_model import get_coco_pretrain_from_obj365
+    #         assert isinstance(args.pretrain_keys_modify_to_load, list)
+    #         for modify_key_to_load in args.pretrain_keys_modify_to_load:
+    #             checkpoint['model'][modify_key_to_load] = get_coco_pretrain_from_obj365(
+    #                 model_without_ddp.state_dict()[modify_key_to_load],
+    #                 checkpoint['model'][modify_key_to_load]
+    #             )
+    #     model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+    #     if args.use_ema:
+    #         del ema_m
+    #         ema_m = ModelEma(model_without_ddp)
 
     output_dir = Path(args.output_dir)
     
