@@ -1775,17 +1775,12 @@ def build(args):
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': args.cls_loss_coef, 
                    'loss_bbox': args.bbox_loss_coef, 
-                   'loss_trans': args.translation_loss_coef,
+                   'loss_giou': args.giou_loss_coef,
+                   'loss_trans_xy': args.trans_xy_loss_coef,
+                   'loss_trans_z': args.trans_z_loss_coef,
                    'loss_keypoint': args.keypoint_loss_coef,
-                   'loss_rot': args.rotation_loss_coef}
-    weight_dict['loss_giou'] = args.giou_loss_coef
-
-    if args.rotation_representation == '6d':
-        #losses = ['translation', 'rotation']
-        losses = ['pose']
-    else:
-        raise NotImplementedError('Rotation representation not implemented')
-
+                   'loss_rot': args.rot_loss_coef}
+    
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
@@ -1795,6 +1790,7 @@ def build(args):
             aux_weight_dict.update({k + f'_enc': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
 
+    losses = ['pose']
     losses.append('labels')
     losses.append('boxes')
     losses.append('cardinality')
