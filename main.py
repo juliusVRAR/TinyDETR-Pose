@@ -154,9 +154,12 @@ def get_args_parser():
     
     # * Loss coefficients
     # Pose Estimation losses
-    parser.add_argument('--translation_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation')
     parser.add_argument('--keypoint_loss_coef', default=10.0, type=float, help='Loss weighing parameter for the keypoints')
-    parser.add_argument('--rotation_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the rotation')
+    parser.add_argument('--trans_z_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation z component')
+    parser.add_argument('--trans_xy_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation')
+    parser.add_argument('--rot_loss_coef', default=2.0, type=float, help='Loss weighing parameter for the rotation')
+    parser.add_argument('--adds_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the ADD-S metric. Active after warmup epochs.')
+    parser.add_argument('--warm_up_epochs', default=15, type=int, help='Number of epochs before ADD-S loss multiplier is activated.')
     # Loss
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
@@ -389,6 +392,9 @@ def main(args):
     #     if args.use_ema:
     #         del ema_m
     #         ema_m = ModelEma(model_without_ddp)
+    if args.use_ema:
+        del ema_m
+        ema_m = ModelEma(model_without_ddp)
 
     output_dir = Path(args.output_dir)
     

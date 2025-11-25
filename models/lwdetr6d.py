@@ -504,10 +504,7 @@ class SetCriterion(nn.Module):
         self.mae_loss = nn.L1Loss(reduction="none")
         self.mse_loss = nn.MSELoss(reduction="none")
         self.shape_loss = False
-        self.warm_up_epochs = 5
-        # TODO: These multipliers are in the args.
-        self.weight_2d = 5.0
-        self.weight_3d = 1.0
+        
 
     ###################PoET no CAD needed#########################
     # Pose losses

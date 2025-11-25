@@ -73,6 +73,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             torchvision.utils.save_image(grid, filename, nrow=nrow, padding=2, normalize=normalize)
             # print(f"Grid saved as {filename}")
         outputs = model(samples, targets)
+
+        # Update the weight in the criterion's dictionary BEFORE summing
+        if epoch < args.warm_up_epochs:
+            criterion.weight_dict['loss_adds'] = 0.0
+        else:
+            criterion.weight_dict['loss_adds'] = args.adds_loss_coef
+
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
