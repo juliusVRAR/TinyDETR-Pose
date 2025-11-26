@@ -927,47 +927,49 @@ class SetCriterion(nn.Module):
         Returns:
             dict with individual and total pose losses
         """
-        
-        # Loss weights from paper (empirically tuned)
-        lambda_adds = 1.0 # Gemini says this should be less: # Start small! This loss can be large in magnitude. 0.1 
-        lambda_rot = 1.0
-        lambda_kpt = 1.0
-        lambda_trans_xy = 1.0
-        lambda_trans_z = 1.0
+        if "relative_rotation" in targets[0]:     
+            # Loss weights from paper (empirically tuned)
+            lambda_adds = 1.0 # Gemini says this should be less: # Start small! This loss can be large in magnitude. 0.1 
+            lambda_rot = 1.0
+            lambda_kpt = 1.0
+            lambda_trans_xy = 1.0
+            lambda_trans_z = 1.0
 
-        # Compute individual losses
-        loss_adds_dict = self.loss_adds(outputs, targets, indices)
-        loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
-        loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
-        loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
-        loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
-        
-        # Extract loss values
-        loss_adds = loss_adds_dict['loss_adds']
-        loss_rot = loss_rot_dict['loss_rot']
-        #loss_trans = loss_trans_dict['loss_translation']
-        loss_kpt = loss_kpt_dict['loss_keypoint']
-        loss_trans_xy = loss_trans_xy['loss_trans_xy']
-        loss_trans_z = loss_trans_z['loss_trans_z']
+            # Compute individual losses
+            loss_adds_dict = self.loss_adds(outputs, targets, indices)
+            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
+            loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
+            loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
+            
+            # Extract loss values
+            loss_adds = loss_adds_dict['loss_adds']
+            loss_rot = loss_rot_dict['loss_rot']
+            #loss_trans = loss_trans_dict['loss_translation']
+            loss_kpt = loss_kpt_dict['loss_keypoint']
+            loss_trans_xy = loss_trans_xy['loss_trans_xy']
+            loss_trans_z = loss_trans_z['loss_trans_z']
 
-        # Total weighted pose loss
-        loss_pose_total = (
-            lambda_adds * loss_adds +
-            lambda_rot * loss_rot +
-            lambda_kpt * loss_kpt +
-            lambda_trans_z * loss_trans_z +
-            lambda_trans_xy * loss_trans_xy
-        )
-        
-        # Return all components for logging
-        return {
-            'loss_pose': loss_pose_total,
-            'loss_rot': loss_rot,
-            'loss_keypoint': loss_kpt,
-            'loss_trans_xy': loss_trans_xy,
-            'loss_trans_z': loss_trans_z,
-            'loss_adds': loss_adds
-        }
+            # Total weighted pose loss
+            loss_pose_total = (
+                lambda_adds * loss_adds +
+                lambda_rot * loss_rot +
+                lambda_kpt * loss_kpt +
+                lambda_trans_z * loss_trans_z +
+                lambda_trans_xy * loss_trans_xy
+            )
+            
+            # Return all components for logging
+            return {
+                'loss_pose': loss_pose_total,
+                'loss_rot': loss_rot,
+                'loss_keypoint': loss_kpt,
+                'loss_trans_xy': loss_trans_xy,
+                'loss_trans_z': loss_trans_z,
+                'loss_adds': loss_adds
+            }
+        else:
+            return {}
 
     ######################################################
 
