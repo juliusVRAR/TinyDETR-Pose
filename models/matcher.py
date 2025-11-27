@@ -114,112 +114,6 @@ class HungarianMatcher(nn.Module):
                 ]
         return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
-class PoseMatcher(nn.Module):
-    """
-    This class computes an assignment between the network's predictions and targets. The matching is
-    done based on the predicted bounding boxes. However, the predicted class is used to remove matches if the class is
-    off.
-    """
-
-    def __init__(self,
-                 cost_bbox: float = 1,
-                 cost_class: float = 1,
-                 bbox_mode: str = "gt",
-                 class_mode: str = "specific"):
-        """
-        cost_bbox: weighting parameter for the bounding box cost
-        cost_class: weighting parameter for the class cost
-        bbox_mode: mode with which the bounding box information was fed to the transformer part of PoET
-        class_mode: determines whether PoET is used in a class specific or agnostic way
-        """
-        super().__init__()
-        self.cost_bbox = cost_bbox
-        self.cost_class = cost_class
-        self.bbox_mode = bbox_mode
-        self.class_mode = class_mode
-
-    def forward(self, outputs, targets, n_boxes, giou_thresh=0.5):
-        """ Performs the matching
-
-                Params:
-                    outputs: This is a dict that contains at least these entries:
-                         "pred_translation": Tensor of dim [batch_size, num_queries, 3 (*n_classes)] with the predicted translation
-                         "pred_rotation": Tensor of dim [batch_size, num_queries, rot_dim (*n_classes)] with the predicted rotations
-                         "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
-                         "pred_classes": Tensor of dim [batch_size, num_queries, 1] with the predicted classes
-
-
-                    targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
-                         "relative_pose":
-                            "position": Tensor of dim [num_target_boxes, 3 (*n_classes)] containing the target translation
-                            "rotation": Tensor of dim [num_target_boxes, rot_dim (*n_classes)] containing the target rotation
-                         "boxes": Tensor of dim [num_target_boxes, 4] containing the target box coordinates
-                         "labels": Tensor of dim [num_target_boxes, 1] containing the target labels
-
-                    n_boxes: This is a list of number of boxes (len(n_boxes) = batch_size) predicted per image.
-
-                    giou_thresh: threshold value that the generalized IoU between predicted and target box
-                    have to have for the matching
-
-                Returns:
-                    A list of size batch_size, containing tuples of (index_i, index_j) where:
-                        - index_i is the indices of the selected predictions (in order)
-                        - index_j is the indices of the corresponding selected targets (in order)
-                    For each batch element, it holds:
-                        len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
-                """
-        with torch.no_grad():
-            bs, num_queries = outputs["pred_boxes"].shape[:2]
-
-            # Flatten to compute cost matrices in a batch
-            out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
-            out_class = outputs["pred_classes"].flatten(0, 1)
-
-            # Concat target boxes
-            tgt_bbox = torch.cat([t["boxes"] for t in targets])
-            tgt_class = torch.cat([t["labels"].type(torch.float32) for t in targets])
-
-            # Compute L1 cost between box centers
-            cost_bbox = torch.cdist(out_bbox[:, 0:2], tgt_bbox[:, 0:2], p=1)
-
-            # Compute classification cost
-            cost_class = []
-            for cls in out_class:
-                cost_class.append(torch.where(cls == tgt_class, 0., 1.))
-            cost_class = torch.stack(cost_class)
-
-            # Final cost matrix
-            # TODO: Find a better weighting between bounding box and class cost // e.g. normalization
-            C = self.cost_bbox * cost_bbox + self.cost_class * cost_class
-            C = C.view(bs, num_queries, -1).cpu()
-
-            # PoET adds dummy query embeddings to allow for batch processing.
-            # The transformer does not change the order of the queries, hence the indices of the dummy embeddings are known
-            # Filter them out by taking only the first n_boxes boxes predicted per image in the batch
-            sizes = [len(v["boxes"]) for v in targets]
-            indices = []
-            
-            # Calculate the generalized IoU and remove matches if the boxes do not overlap at all --> no prediction
-            new_indices = []
-            for b, (out_box, out_cls, tgt) in enumerate(zip(out_bbox.split(num_queries), out_class.split(num_queries), targets)):
-                tgt_box = tgt["boxes"]
-                tgt_cls = tgt["labels"]
-                gious = generalized_box_iou(box_cxcywh_to_xyxy(out_box[:n_boxes[b]]), box_cxcywh_to_xyxy(tgt_box))
-                new_src_idx = []
-                new_tgt_idx = []
-                for idx, (i, j) in enumerate(zip(indices[b][0], indices[b][1])):
-                    giou = gious[i, j]
-                    if giou < giou_thresh:
-                        # print("Match removed GIoU: {}".format(giou))
-                        continue
-                    else:
-                        new_src_idx.append(i)
-                        new_tgt_idx.append(j)
-                new_indices.append((np.array(new_src_idx), np.array(new_tgt_idx)))
-            indices = new_indices
-
-            return [(torch.as_tensor(i, dtype=torch.int64), 
-                     torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 class Matcher6D(nn.Module):
     """Hungarian matcher for 6D pose estimation tasks.
@@ -476,11 +370,6 @@ def build_matcher(args):
             cost_bbox=args.set_cost_bbox,
             cost_giou=args.set_cost_giou,
             focal_alpha=args.focal_alpha,)
-    elif args.matcher_type == 'pose':
-        return PoseMatcher(cost_bbox=args.set_cost_bbox, 
-                           cost_class=args.set_cost_class, 
-                           bbox_mode=args.bbox_mode,
-                           class_mode=args.class_mode)
     elif args.matcher_type == '6d':
         return Matcher6D(cost_bbox=args.set_cost_bbox, 
                          cost_class=args.set_cost_class, 

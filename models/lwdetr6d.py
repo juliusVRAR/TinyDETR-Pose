@@ -220,6 +220,7 @@ class LWDETR6D(nn.Module):
         
         print(f">> Class Head initialized with bias -4.6 (Prob 0.01)")
         print(">> Pose Heads Initialized: Z-Uncertainty set high, XY centered.")
+        
     def forward(self, samples: NestedTensor, targets=None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
