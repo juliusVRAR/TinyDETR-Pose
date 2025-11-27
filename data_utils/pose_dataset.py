@@ -197,6 +197,7 @@ class PoseDataset(CocoDetection):
             if cache_file.is_file():
                 data = torch.load(cache_file)
                 self._model_points = {int(k): v for k, v in data.items()}
+                self._model_points = {k: v / 1000. for k, v in self._model_points.items()}
             else:
                 # Build list of mesh file paths keyed by class id
                 # Assumes models_info keys are object ids (e.g. "1","2",...) and
@@ -214,7 +215,7 @@ class PoseDataset(CocoDetection):
                 for obj_id, pts in sampled.items():
                     if not torch.is_tensor(pts):
                         pts = torch.as_tensor(pts, dtype=torch.float32)
-                    self._model_points[int(obj_id)] = pts  # (N,3)
+                    self._model_points[int(obj_id)] = pts / 1000. # (N,3)
                 torch.save(self._model_points, cache_file)
 
     def __getitem__(self, idx):

@@ -223,7 +223,7 @@ def build_coco_eval(image_set, args):
     assert root.exists(), f'provided COCO path {root} does not exist'
     mode = 'instances'
     PATHS = {
-        "val": (root / "ycbv", root / "ycbv" / "annotations" / f'instances_test_bop.json'),
+        "val": (root , root / "annotations" / f'instances_test_bop.json'),
     }
     
     img_folder, ann_file = PATHS[image_set.split("_")[0]]

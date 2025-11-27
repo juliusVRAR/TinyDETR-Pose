@@ -555,81 +555,68 @@ class SetCriterion(nn.Module):
 
     ############### Losses proposed in yolox6d ######################
     #### My ADD-S and Rot loss. TODO: Check if it differs from the YOLOX6d implementation
-    def loss_adds(self, 
-                  outputs, 
-                  targets, 
-                  indices, 
-                  num_boxes=None, 
-                  shape_loss=False):
+    def loss_adds(self, outputs, targets, indices, num_boxes):
         """
-        ADD / ADD-S loss (mean normalized point distance).
-        shape_loss: if True ignore translation (rotation-only shape alignment).
-        outputs:
-            pred_rotations: (B,Q,3,3)
-            pred_translations: (B,Q,3)
-        targets per batch element:
-            relative_rotations or rotations: (N,3,3)
-            relative_positions or translations: (N,3)
-            model_points: (N,P,3)
-            diameter: (N,)
-            is_symmetric: (N,) bool
-        indices: list of (pred_idx, tgt_idx)
+        ADD / ADD-S loss (Raw Meter Distance).
         """
-        # Accept both naming conventions in targets
-        device = outputs['pred_rotations'].device
-        pred_R = outputs['pred_rotations']
-        pred_t = outputs['pred_translations']
+        pred_R = outputs['pred_rotations']     # (B, Q, 3, 3)
+        pred_t = outputs['pred_translations']  # (B, Q, 3)
 
-        total_point_loss = 0.0
-        total_instances = 0
+        # We will accumulate the SUM of distances and divide by num_boxes at the end
+        total_dist_sum = 0.0
 
         for b, (pi, ti) in enumerate(indices):
-            if len(pi) == 0:
-                continue
+            if len(pi) == 0: continue
+
+            # 1. Fetch Data
+            # Note: We don't need 'diameter' anymore if we want raw meter loss
             tgt = targets[b]
-            R_p = pred_R[b][pi]  # (M,3,3)
-            t_p = pred_t[b][pi]  # (M,3)
-            R_g = tgt.get('relative_rotation')[ti]      # (M,3,3)
-            t_g = tgt.get('relative_position')[ti]   # (M,3)
-            pts  = tgt['model_points'][ti]        # (M,P,3)
-            diam = tgt['diameter'][ti]            # (M,)
-            sym  = tgt['is_symmetric'][ti].to(torch.bool)  # (M,)
+            R_p, t_p = pred_R[b][pi], pred_t[b][pi]
+            
+            # Ensure targets are float32 to match preds
+            R_g = tgt['relative_rotation'][ti].float() # (M, 3, 3)
+            t_g = tgt['relative_position'][ti].float() # (M, 3)
+            pts = tgt['model_points'][ti].float() # (M, P, 3)
+            sym = tgt['is_symmetric'][ti].bool()  # (M,)
 
-            # Transform points (omit translation if shape_loss)
-            if shape_loss:
-                pts_pred = (R_p @ pts.transpose(1,2)).transpose(1,2)  # (M,P,3)
-                pts_gt   = (R_g @ pts.transpose(1,2)).transpose(1,2)  # (M,P,3)
-            else:
-                pts_pred = (R_p @ pts.transpose(1,2) + t_p.unsqueeze(-1)).transpose(1,2)
-                pts_gt   = (R_g @ pts.transpose(1,2) + t_g.unsqueeze(-1)).transpose(1,2)
+            # 2. Transform Points (Batch Matrix Multiplication)
+            # Formula: (R @ points.T).T + t
+            # pred: (M, 3, 3) @ (M, 3, P) -> (M, 3, P) -> (M, P, 3)
+            pts_p = torch.bmm(R_p, pts.transpose(1, 2)).transpose(1, 2) + t_p.unsqueeze(1)
+            pts_g = torch.bmm(R_g, pts.transpose(1, 2)).transpose(1, 2) + t_g.unsqueeze(1)
 
-            # Non-symmetric distances
-            diff = pts_pred - pts_gt
-            d_nonsym = diff.norm(dim=-1).mean(dim=-1)  # (M,)
+            # 3. Calculate Distances
+            # Default: ADD (Non-Symmetric) - 1-to-1 distance
+            # Shape: (M, P, 3) -> (M, P) -> (M,)
+            diff = pts_p - pts_g
+            dists = diff.norm(dim=-1).mean(dim=-1)
 
-            # Symmetric subset (ADD-S)
+            # 4. Handle Symmetric Objects (ADD-S)
             if sym.any():
                 sym_idx = torch.where(sym)[0]
-                pp = pts_pred[sym_idx]
-                gg = pts_gt[sym_idx]
-                d_pair = torch.cdist(pp, gg, p=2)                 # (Ms,P,P)
-                d_sym = d_pair.min(dim=-1).values.mean(dim=-1)    # (Ms,)
-                d_all = d_nonsym.clone()
-                d_all[sym_idx] = d_sym
-            else:
-                d_all = d_nonsym
+                
+                # Extract symmetric subset
+                p_sym = pts_p[sym_idx] # (S, P, 3)
+                g_sym = pts_g[sym_idx] # (S, P, 3)
 
-            diam_safe = torch.clamp(diam, min=1e-6)
-            inst_loss = (d_all / diam_safe).mean()
-            total_point_loss += inst_loss
-            total_instances += 1
+                # Compute pairwise distance matrix (S, P, P)
+                # This finds the closest point on GT for every point on Pred
+                pairwise_dist = torch.cdist(p_sym, g_sym, p=2)
+                
+                # Min over GT points (dim 2), then Mean over Pred points (dim 1)
+                min_dists = pairwise_dist.min(dim=2).values.mean(dim=1)
+                
+                # Overwrite the standard ADD distances with ADD-S distances
+                dists[sym_idx] = min_dists
 
-        if total_instances == 0:
-            loss_adds = torch.zeros((), device=device, requires_grad=True)
-        else:
-            loss_adds = total_point_loss / total_instances
+            # 5. Sum up the error for this batch
+            total_dist_sum += dists.sum()
 
-        # Key remains loss_adds (rotation-only if shape_loss True)
+        # 6. Normalize by total number of matched objects in the batch (DETR standard)
+        # Avoid division by zero
+        num_boxes = max(num_boxes, 1)
+        loss_adds = total_dist_sum / num_boxes
+
         return {'loss_adds': loss_adds}
     # Rotation loss from YOLO-6D Paper (6D representation with L1 loss) 
     def loss_rot(self, 
@@ -688,7 +675,7 @@ class SetCriterion(nn.Module):
         EPSILON = torch.finfo(torch.float32).eps
         
         total = 0.0
-        count = 0
+        
         idx = self._get_src_permutation_idx(indices)
         # Get the predicted Normalized UV for matched queries
         src_norm_uv = outputs['pred_uv_norm'][idx]
@@ -937,7 +924,7 @@ class SetCriterion(nn.Module):
             lambda_trans_z = 1.0
 
             # Compute individual losses
-            loss_adds_dict = self.loss_adds(outputs, targets, indices)
+            loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
             loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
