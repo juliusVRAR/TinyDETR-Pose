@@ -379,7 +379,7 @@ class LWDETR6D(nn.Module):
                 cls_enc.append(cls_enc_gidx)
                 rot_enc_list.append(self.transformer.enc_out_rot_embed[g_idx](enc_feat))      # (B, num_queries, rot_dim)
                 
-                # TODO: Check if keypoint preds work the here.
+    
                 trans_enc = self.transformer.enc_out_trans_embed[g_idx](enc_feat)  # (B, num_queries, 3)
                 uv_norm_enc = self.transformer.enc_out_trans_xy_embed[g_idx](trans_enc).sigmoid()  # (B, num_queries, 2)
                 u = uv_norm_enc[..., 0:1] * img_w
@@ -394,9 +394,10 @@ class LWDETR6D(nn.Module):
                 trans_enc_z = norm_z_enc * self.max_depth # Pred z in meters
                 
                 if len(samples.meta) != 0:
-                    trans_enc_x = (u.squeeze(-1) - cx) * trans_enc_z / fx
-                    trans_enc_y = (v.squeeze(-1) - cy) * trans_enc_z / fy
-                    trans_enc = torch.cat([trans_enc_x, trans_enc_y, trans_enc_z.unsqueeze(0)]).permute(1,2,0)
+                    trans_enc_x = (u.squeeze(-1) - cx.squeeze(0)) * trans_enc_z / fx.squeeze(0)
+                    trans_enc_y = (v.squeeze(-1) - cy.squeeze(0)) * trans_enc_z / fy.squeeze(0)
+                    trans_enc = torch.stack([trans_enc_x, trans_enc_y, trans_enc_z], dim=-1)
+                    #trans_enc = torch.cat([trans_enc_x, trans_enc_y, trans_enc_z.unsqueeze(0)]).permute(1,2,0)
                 else: # Backup matrix for benchmark testing
                     trans_enc_x = (u - cx) * trans_enc_z.unsqueeze(-1)  / fx
                     trans_enc_y = (v - cy) * trans_enc_z.unsqueeze(-1)  / fy
