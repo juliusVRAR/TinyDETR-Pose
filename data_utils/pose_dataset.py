@@ -621,7 +621,7 @@ class MosaicDetection(PoseDataset):
         mixup_scale=(1., 1.), 
         shear=0.0, 
         enable_mixup=True,
-        mosaic_prob=0.0, 
+        mosaic_prob=0.5, 
         mixup_prob=1.0,  
     ):
         """
@@ -654,236 +654,236 @@ class MosaicDetection(PoseDataset):
         return len(self._dataset)
 
     def __getitem__(self, idx):
-        #if False: # To trigger it everytime for debugging
-        if self.enable_mosaic and random.random() < self.mosaic_prob: # This should always be triggered as long as mosaic is 1.0
-            mosaic_labels = []
-            mosaic_rots = []
-            mosaic_trans = []
-            mosaic_obj_ids = []
-            mosaic_intrinsics = []
-            mosaic_keypoints = []
-            input_dim = (self._dataset.im_size[0], self._dataset.im_size[1]) # (h, w)
-            input_h, input_w = input_dim[0], input_dim[1]
-            
-            # yc, xc = s, s  # mosaic center x, y
-            yc = int(random.uniform(0.5 * input_h, 1.5 * input_h))
-            xc = int(random.uniform(0.5 * input_w, 1.5 * input_w))
-
-            # 3 additional image indices, why 3 ?
-            indices = [idx] + [random.randint(0, len(self._dataset) - 1) for _ in range(3)]
-            for i_mosaic, index in enumerate(indices):
-                img_tensor, _labels = self._dataset[index]
-                img_id = _labels['image_id'].item()
-                # To numpy 
-                img = img_tensor.numpy()
-                # Normalize it
-                img = (img.clip(0,1) * 255).astype(np.uint8)
-                img = img.transpose(1, 2, 0)  # to hwc
-                h0, w0 = img.shape[:2]  # orig hw
-                scale = min(1. * input_h / h0, 1. * input_w / w0)
-                img = cv2.resize(img, 
-                                 (int(w0 * scale), int(h0 * scale)), 
-                                 interpolation=cv2.INTER_LINEAR)
-                # generate output mosaic image
-                (h, w, c) = img.shape[:3]
-                if i_mosaic == 0:
-                    mosaic_img = np.full((input_h * 2, input_w * 2, c), 114, dtype=np.uint8)
-                    if DEBUG:
-                        out = Path(DEBUG_OUT, "mosaic_background.png")
-                        Image.fromarray(mosaic_img).save(out)
-                    # Normalize since our img is alo normalized
-                    #mosaic_img = mosaic_img.astype(np.float32) / 255.0
-                # suffix l means large image, while s means small image in mosaic aug.
-                (l_x1, l_y1, l_x2, l_y2), (s_x1, s_y1, s_x2, s_y2) = get_mosaic_coordinate(
-                    mosaic_img, i_mosaic, xc, yc, w, h, input_h, input_w
-                )
-                # This has to be the camera intrinsics from the target not the given dataset camera??
-                base_cam = self._dataset.camera
-                base_scene_cam = self._dataset.camera
-                mosaic_img[l_y1:l_y2, l_x1:l_x2] = img[s_y1:s_y2, s_x1:s_x2]
-                padw, padh = l_x1 - s_x1, l_y1 - s_y1
-
-                bboxes_xywh = _labels['boxes'].clone().numpy()
-                relative_rotation = _labels['relative_rotation'].clone()
-                relative_position = _labels['relative_position'].clone()
-                relative_quaternions = _labels['relative_quaternions'].clone()
-                labels = _labels["labels"]
-                width, height = img.shape[1], img.shape[0]
-                lst_boxes_xyxy = []
         
-                # BBoxes comes in normalized (0,1) and xywh coords format
-                # We need absolute pixes xyxy coords for mosaic
-                for bbox in bboxes_xywh:
-                    x_center, y_center, w, h = bbox
-                    x1 = (x_center - w/2) * width
-                    y1 = (y_center - h/2) * height
-                    x2 = (x_center + w/2) * width
-                    y2 = (y_center + h/2) * height
-                    lst_boxes_xyxy.append([x1, y1, x2, y2])
-                    boxes= np.array(lst_boxes_xyxy) # xyxy and absolute pixel coords
+        # if self.enable_mosaic and random.random() < self.mosaic_prob: # This should always be triggered as long as mosaic is 1.0
+        #     mosaic_labels = []
+        #     mosaic_rots = []
+        #     mosaic_trans = []
+        #     mosaic_obj_ids = []
+        #     mosaic_intrinsics = []
+        #     mosaic_keypoints = []
+        #     input_dim = (self._dataset.im_size[0], self._dataset.im_size[1]) # (h, w)
+        #     input_h, input_w = input_dim[0], input_dim[1]
+            
+        #     # yc, xc = s, s  # mosaic center x, y
+        #     yc = int(random.uniform(0.5 * input_h, 1.5 * input_h))
+        #     xc = int(random.uniform(0.5 * input_w, 1.5 * input_w))
+
+        #     # 3 additional image indices, why 3 ?
+        #     indices = [idx] + [random.randint(0, len(self._dataset) - 1) for _ in range(3)]
+        #     for i_mosaic, index in enumerate(indices):
+        #         img_tensor, _labels = self._dataset[index]
+        #         img_id = _labels['image_id'].item()
+        #         # To numpy 
+        #         img = img_tensor.numpy()
+        #         # Normalize it
+        #         img = (img.clip(0,1) * 255).astype(np.uint8)
+        #         img = img.transpose(1, 2, 0)  # to hwc
+        #         h0, w0 = img.shape[:2]  # orig hw
+        #         scale = min(1. * input_h / h0, 1. * input_w / w0)
+        #         img = cv2.resize(img, 
+        #                          (int(w0 * scale), int(h0 * scale)), 
+        #                          interpolation=cv2.INTER_LINEAR)
+        #         # generate output mosaic image
+        #         (h, w, c) = img.shape[:3]
+        #         if i_mosaic == 0:
+        #             mosaic_img = np.full((input_h * 2, input_w * 2, c), 114, dtype=np.uint8)
+        #             if DEBUG:
+        #                 out = Path(DEBUG_OUT, "mosaic_background.png")
+        #                 Image.fromarray(mosaic_img).save(out)
+        #             # Normalize since our img is alo normalized
+        #             #mosaic_img = mosaic_img.astype(np.float32) / 255.0
+        #         # suffix l means large image, while s means small image in mosaic aug.
+        #         (l_x1, l_y1, l_x2, l_y2), (s_x1, s_y1, s_x2, s_y2) = get_mosaic_coordinate(
+        #             mosaic_img, i_mosaic, xc, yc, w, h, input_h, input_w
+        #         )
+        #         # This has to be the camera intrinsics from the target not the given dataset camera??
+        #         base_cam = self._dataset.camera
+        #         base_scene_cam = self._dataset.camera
+        #         mosaic_img[l_y1:l_y2, l_x1:l_x2] = img[s_y1:s_y2, s_x1:s_x2]
+        #         padw, padh = l_x1 - s_x1, l_y1 - s_y1
+
+        #         bboxes_xywh = _labels['boxes'].clone().numpy()
+        #         relative_rotation = _labels['relative_rotation'].clone()
+        #         relative_position = _labels['relative_position'].clone()
+        #         relative_quaternions = _labels['relative_quaternions'].clone()
+        #         labels = _labels["labels"]
+        #         width, height = img.shape[1], img.shape[0]
+        #         lst_boxes_xyxy = []
+        
+        #         # BBoxes comes in normalized (0,1) and xywh coords format
+        #         # We need absolute pixes xyxy coords for mosaic
+        #         for bbox in bboxes_xywh:
+        #             x_center, y_center, w, h = bbox
+        #             x1 = (x_center - w/2) * width
+        #             y1 = (y_center - h/2) * height
+        #             x2 = (x_center + w/2) * width
+        #             y2 = (y_center + h/2) * height
+        #             lst_boxes_xyxy.append([x1, y1, x2, y2])
+        #             boxes= np.array(lst_boxes_xyxy) # xyxy and absolute pixel coords
                 
-                if len(boxes) > 0:
-                    boxes[:, 0] = scale * boxes[:, 0] + padw 
-                    boxes[:, 1] = scale * boxes[:, 1] + padh 
-                    boxes[:, 2] = scale * boxes[:, 2] + padw 
-                    boxes[:, 3] = scale * boxes[:, 3] + padh
+        #         if len(boxes) > 0:
+        #             boxes[:, 0] = scale * boxes[:, 0] + padw 
+        #             boxes[:, 1] = scale * boxes[:, 1] + padh 
+        #             boxes[:, 2] = scale * boxes[:, 2] + padw 
+        #             boxes[:, 3] = scale * boxes[:, 3] + padh
                    
-                    if len(bboxes_xywh) > 0:
-                        # per-image adjusted intrinsics (identical for all objects from this source image)
-                        # We dont want to touch the camera matrix params from the dataset.
-                        fx_adj = base_cam["fx"] * scale
-                        fy_adj = base_cam["fy"] * scale
-                        cx_adj = base_cam["cx"] * scale + padw
-                        cy_adj = base_cam["cy"] * scale + padh
+        #             if len(bboxes_xywh) > 0:
+        #                 # per-image adjusted intrinsics (identical for all objects from this source image)
+        #                 # We dont want to touch the camera matrix params from the dataset.
+        #                 fx_adj = base_cam["fx"] * scale
+        #                 fy_adj = base_cam["fy"] * scale
+        #                 cx_adj = base_cam["cx"] * scale + padw
+        #                 cy_adj = base_cam["cy"] * scale + padh
                         
-                        intrinsics_adj = torch.tensor([fx_adj, fy_adj, cx_adj, cy_adj], 
-                                                      dtype=torch.float32)
-                        intrinsics_adj = intrinsics_adj.unsqueeze(0).repeat(relative_position.shape[0], 1) 
+        #                 intrinsics_adj = torch.tensor([fx_adj, fy_adj, cx_adj, cy_adj], 
+        #                                               dtype=torch.float32)
+        #                 intrinsics_adj = intrinsics_adj.unsqueeze(0).repeat(relative_position.shape[0], 1) 
                         
-                # Append only matching groups
-                assert relative_position.shape[0] == boxes.shape[0], \
-                    f"Pose count {relative_position.shape[0]} != boxes count {boxes.shape[0]}"        
-                mosaic_labels.append(boxes)
-                mosaic_rots.append(relative_rotation)
-                mosaic_trans.append(relative_position)
-                mosaic_obj_ids.append(labels)
-                mosaic_intrinsics.append(intrinsics_adj)
+        #         # Append only matching groups
+        #         assert relative_position.shape[0] == boxes.shape[0], \
+        #             f"Pose count {relative_position.shape[0]} != boxes count {boxes.shape[0]}"        
+        #         mosaic_labels.append(boxes)
+        #         mosaic_rots.append(relative_rotation)
+        #         mosaic_trans.append(relative_position)
+        #         mosaic_obj_ids.append(labels)
+        #         mosaic_intrinsics.append(intrinsics_adj)
 
-            if len(mosaic_labels):
-                mosaic_labels = np.concatenate(mosaic_labels, 0)
-                mosaic_rots = np.concatenate(mosaic_rots, 0)
-                mosaic_trans = np.concatenate(mosaic_trans, 0)
-                mosaic_obj_ids = np.concatenate(mosaic_obj_ids, 0)
-                mosaic_intrinsics = torch.cat(mosaic_intrinsics, 0)
-                # ## Vis without touching camera params
-                # keypoints_2d = []
-                # for i in range(mosaic_trans.shape[0]):
-                #     label = int(mosaic_obj_ids[i])
-                #     info = self._dataset.models_info.get(str(label), None)
-                #     if info is None:
-                #         keypoints_2d.append(np.zeros((8,2), dtype=np.float32))
-                #         continue
-                #     min_x, min_y, min_z = info["min_x"], info["min_y"], info["min_z"]
-                #     sx, sy, sz = info["size_x"], info["size_y"], info["size_z"]
-                #     max_x, max_y, max_z = min_x + sx, min_y + sy, min_z + sz
-                #     corners_obj = np.array([
-                #         [min_x, min_y, min_z],
-                #         [max_x, min_y, min_z],
-                #         [max_x, max_y, min_z],
-                #         [min_x, max_y, min_z],
-                #         [min_x, min_y, max_z],
-                #         [max_x, min_y, max_z],
-                #         [max_x, max_y, max_z],
-                #         [min_x, max_y, max_z],
-                #     ], dtype=np.float32)  # (8,3)
-                #     R = mosaic_rots[i]
-                #     t = mosaic_trans[i]
-                #     fx, fy, cx, cy = mosaic_intrinsics[i].tolist()
-                #     pts_cam = (R @ corners_obj.T + t.reshape(3,1)).T
-                #     uv = np.zeros((8,2), dtype=np.float32)
-                #     valid = pts_cam[:,2] > 1e-6
-                #     uv[valid] = np.stack([
-                #         fx * pts_cam[valid,0] / pts_cam[valid,2] + cx,
-                #         fy * pts_cam[valid,1] / pts_cam[valid,2] + cy
-                #     ], axis=1)
-                #     keypoints_2d.append(uv)
-                # mosaic_keypoints_2d = torch.from_numpy(np.stack(keypoints_2d, 0))  # (N,8,2)
+        #     if len(mosaic_labels):
+        #         mosaic_labels = np.concatenate(mosaic_labels, 0)
+        #         mosaic_rots = np.concatenate(mosaic_rots, 0)
+        #         mosaic_trans = np.concatenate(mosaic_trans, 0)
+        #         mosaic_obj_ids = np.concatenate(mosaic_obj_ids, 0)
+        #         mosaic_intrinsics = torch.cat(mosaic_intrinsics, 0)
+        #         # ## Vis without touching camera params
+        #         # keypoints_2d = []
+        #         # for i in range(mosaic_trans.shape[0]):
+        #         #     label = int(mosaic_obj_ids[i])
+        #         #     info = self._dataset.models_info.get(str(label), None)
+        #         #     if info is None:
+        #         #         keypoints_2d.append(np.zeros((8,2), dtype=np.float32))
+        #         #         continue
+        #         #     min_x, min_y, min_z = info["min_x"], info["min_y"], info["min_z"]
+        #         #     sx, sy, sz = info["size_x"], info["size_y"], info["size_z"]
+        #         #     max_x, max_y, max_z = min_x + sx, min_y + sy, min_z + sz
+        #         #     corners_obj = np.array([
+        #         #         [min_x, min_y, min_z],
+        #         #         [max_x, min_y, min_z],
+        #         #         [max_x, max_y, min_z],
+        #         #         [min_x, max_y, min_z],
+        #         #         [min_x, min_y, max_z],
+        #         #         [max_x, min_y, max_z],
+        #         #         [max_x, max_y, max_z],
+        #         #         [min_x, max_y, max_z],
+        #         #     ], dtype=np.float32)  # (8,3)
+        #         #     R = mosaic_rots[i]
+        #         #     t = mosaic_trans[i]
+        #         #     fx, fy, cx, cy = mosaic_intrinsics[i].tolist()
+        #         #     pts_cam = (R @ corners_obj.T + t.reshape(3,1)).T
+        #         #     uv = np.zeros((8,2), dtype=np.float32)
+        #         #     valid = pts_cam[:,2] > 1e-6
+        #         #     uv[valid] = np.stack([
+        #         #         fx * pts_cam[valid,0] / pts_cam[valid,2] + cx,
+        #         #         fy * pts_cam[valid,1] / pts_cam[valid,2] + cy
+        #         #     ], axis=1)
+        #         #     keypoints_2d.append(uv)
+        #         # mosaic_keypoints_2d = torch.from_numpy(np.stack(keypoints_2d, 0))  # (N,8,2)
 
 
-                # Clip all boxes to be within the image bounds
-                np.clip(mosaic_labels[:, 0], 0, 2 * input_w, out=mosaic_labels[:, 0])
-                np.clip(mosaic_labels[:, 1], 0, 2 * input_h, out=mosaic_labels[:, 1])
-                np.clip(mosaic_labels[:, 2], 0, 2 * input_w, out=mosaic_labels[:, 2])
-                np.clip(mosaic_labels[:, 3], 0, 2 * input_h, out=mosaic_labels[:, 3])
-            #### We need the object keypoint from the mosaic before random affine to ####
-            if DEBUG:
-                # Mosaic image 
-                out = Path(DEBUG_OUT, "mosaic_img_b4_random_affine.jpg")
-                Image.fromarray(mosaic_img).save(out)
-                # random_affine expects a np.array so we put the mosaic into a tempraory tensor for debug vizualization
-                mosaic_img_debug_out=torch.from_numpy(mosaic_img).to(torch.uint8)
-                mosaic_img_debug_out= mosaic_img_debug_out.permute(2,0,1) # to CHW
-                mosaic_img_debug_out = mosaic_img_debug_out.float() / 255.0
-                # Mosaic image with annotations
-                save_annotated_image(image=mosaic_img, 
-                                        targets={'boxes':torch.tensor(mosaic_labels)}, 
-                                        output_path="annotated_mosaic_b4_affine.png", 
-                                                is_bbbox_coords_normalized=False,  
-                                                is_corrected_bbx_coords=True)
-                if DEBUG:
-                    debug_img = mosaic_img
-                    # Bring back to colorspace 0-255 and BGR -> RGB
-                    #debug_img = (np.clip(debug_img,0,1) * 255).astype(np.uint8)
-                    debug_img = debug_img[..., ::-1] 
-                    debug_img_2 = debug_img
+        #         # Clip all boxes to be within the image bounds
+        #         np.clip(mosaic_labels[:, 0], 0, 2 * input_w, out=mosaic_labels[:, 0])
+        #         np.clip(mosaic_labels[:, 1], 0, 2 * input_h, out=mosaic_labels[:, 1])
+        #         np.clip(mosaic_labels[:, 2], 0, 2 * input_w, out=mosaic_labels[:, 2])
+        #         np.clip(mosaic_labels[:, 3], 0, 2 * input_h, out=mosaic_labels[:, 3])
+        #     #### We need the object keypoint from the mosaic before random affine to ####
+        #     if DEBUG:
+        #         # Mosaic image 
+        #         out = Path(DEBUG_OUT, "mosaic_img_b4_random_affine.jpg")
+        #         Image.fromarray(mosaic_img).save(out)
+        #         # random_affine expects a np.array so we put the mosaic into a tempraory tensor for debug vizualization
+        #         mosaic_img_debug_out=torch.from_numpy(mosaic_img).to(torch.uint8)
+        #         mosaic_img_debug_out= mosaic_img_debug_out.permute(2,0,1) # to CHW
+        #         mosaic_img_debug_out = mosaic_img_debug_out.float() / 255.0
+        #         # Mosaic image with annotations
+        #         save_annotated_image(image=mosaic_img, 
+        #                                 targets={'boxes':torch.tensor(mosaic_labels)}, 
+        #                                 output_path="annotated_mosaic_b4_affine.png", 
+        #                                         is_bbbox_coords_normalized=False,  
+        #                                         is_corrected_bbx_coords=True)
+        #         if DEBUG:
+        #             debug_img = mosaic_img
+        #             # Bring back to colorspace 0-255 and BGR -> RGB
+        #             #debug_img = (np.clip(debug_img,0,1) * 255).astype(np.uint8)
+        #             debug_img = debug_img[..., ::-1] 
+        #             debug_img_2 = debug_img
                     
-                    debug_targets = {
-                        'labels': torch.from_numpy(mosaic_obj_ids),
-                        'relative_position': torch.from_numpy(mosaic_trans),
-                        'relative_rotation': torch.from_numpy(mosaic_rots),
-                        'intrinsics': mosaic_intrinsics,   # per-object intrinsics
-                        #'keypoints_2d': mosaic_keypoints_2d
-                    }
-                    debug_img, _ = visualize_object_keypoints(
-                        cam=None,
-                        targets=debug_targets,
-                        image=debug_img,
-                        obj_infos_by_label=self._dataset.models_info
-                    )
-                    cv2.imwrite(Path(DEBUG_OUT, "keypoints_mosaic_b4_affine.png"), debug_img)
-                    # Visualize 3D bbox and caod model overlay
-                    viz = YCBVVisualizer(self._dataset.cad_model_path)
-                    K = camera_params_to_K(self._dataset.camera)
-                    vis_img = viz.visualize_single_image(debug_img_2, 
-                                                        annotations={'labels': torch.from_numpy(mosaic_obj_ids), 
-                                                                    "relative_position":torch.from_numpy(mosaic_trans), 
-                                                                    "relative_rotation":torch.from_numpy(mosaic_rots),
-                                                                    "intrinsics": mosaic_intrinsics # (N,4)
-                                                                    },
-                                                                    K=K,
-                                                                    show_mesh=True,
-                                                                    sample_points=5000)
-                    cv2.imwrite(Path(DEBUG_OUT, "vis3d_mosaic_b4_affine.png"), vis_img) # Visualization of 3D bboxes and overalayed objects
-                # Apply random affine transformations
-                mosaic_img, mosaic_labels = random_affine(
-                    img=mosaic_img,
-                    rel_pos=relative_position,
-                    rel_rot=relative_rotation,
-                    rel_quats=relative_quaternions,
+        #             debug_targets = {
+        #                 'labels': torch.from_numpy(mosaic_obj_ids),
+        #                 'relative_position': torch.from_numpy(mosaic_trans),
+        #                 'relative_rotation': torch.from_numpy(mosaic_rots),
+        #                 'intrinsics': mosaic_intrinsics,   # per-object intrinsics
+        #                 #'keypoints_2d': mosaic_keypoints_2d
+        #             }
+        #             debug_img, _ = visualize_object_keypoints(
+        #                 cam=None,
+        #                 targets=debug_targets,
+        #                 image=debug_img,
+        #                 obj_infos_by_label=self._dataset.models_info
+        #             )
+        #             cv2.imwrite(Path(DEBUG_OUT, "keypoints_mosaic_b4_affine.png"), debug_img)
+        #             # Visualize 3D bbox and caod model overlay
+        #             viz = YCBVVisualizer(self._dataset.cad_model_path)
+        #             K = camera_params_to_K(self._dataset.camera)
+        #             vis_img = viz.visualize_single_image(debug_img_2, 
+        #                                                 annotations={'labels': torch.from_numpy(mosaic_obj_ids), 
+        #                                                             "relative_position":torch.from_numpy(mosaic_trans), 
+        #                                                             "relative_rotation":torch.from_numpy(mosaic_rots),
+        #                                                             "intrinsics": mosaic_intrinsics # (N,4)
+        #                                                             },
+        #                                                             K=K,
+        #                                                             show_mesh=True,
+        #                                                             sample_points=5000)
+        #             cv2.imwrite(Path(DEBUG_OUT, "vis3d_mosaic_b4_affine.png"), vis_img) # Visualization of 3D bboxes and overalayed objects
+        #         # Apply random affine transformations
+        #         mosaic_img, mosaic_labels = random_affine(
+        #             img=mosaic_img,
+        #             rel_pos=relative_position,
+        #             rel_rot=relative_rotation,
+        #             rel_quats=relative_quaternions,
 
-                    labels=mosaic_obj_ids,
-                    targets=mosaic_labels,
-                    # Can This be already be the image in the resolution we need it instead of padding it?
-                    target_size=((input_h, input_w)), # Now it takes the input dim we need for the ViT to work with
-                    degrees=self.degrees,
-                    translate=self.translate,
-                    scales=self.scale,
-                    shear=self.shear,
-                    camera_matrix=self.camera_matrix,
-                    mosaic_obj_ids=mosaic_obj_ids,
-                    mosaic_intrinsics=mosaic_intrinsics,
-                    mosaic_rots=mosaic_rots,
-                    mosaic_trans=mosaic_trans
-                )  # border to remove
+        #             labels=mosaic_obj_ids,
+        #             targets=mosaic_labels,
+        #             # Can This be already be the image in the resolution we need it instead of padding it?
+        #             target_size=((input_h, input_w)), # Now it takes the input dim we need for the ViT to work with
+        #             degrees=self.degrees,
+        #             translate=self.translate,
+        #             scales=self.scale,
+        #             shear=self.shear,
+        #             camera_matrix=self.camera_matrix,
+        #             mosaic_obj_ids=mosaic_obj_ids,
+        #             mosaic_intrinsics=mosaic_intrinsics,
+        #             mosaic_rots=mosaic_rots,
+        #             mosaic_trans=mosaic_trans
+        #         )  # border to remove
 
-                # -----------------------------------------------------------------
-                # CopyPaste: https://arxiv.org/abs/2012.07177
-                # -----------------------------------------------------------------
-                if (
-                    self.enable_mixup
-                    and not len(mosaic_labels) == 0
-                    and random.random() < self.mixup_prob
-                ):
-                    mosaic_img, mosaic_labels = self.mixup(mosaic_img, mosaic_labels, input_dim)
-                mix_img, padded_labels = self.preproc(mosaic_img, mosaic_labels, input_dim) 
-                img_info = (mix_img.shape[1], mix_img.shape[0])
+        #         # -----------------------------------------------------------------
+        #         # CopyPaste: https://arxiv.org/abs/2012.07177
+        #         # -----------------------------------------------------------------
+        #         if (
+        #             self.enable_mixup
+        #             and not len(mosaic_labels) == 0
+        #             and random.random() < self.mixup_prob
+        #         ):
+        #             mosaic_img, mosaic_labels = self.mixup(mosaic_img, mosaic_labels, input_dim)
+        #         mix_img, padded_labels = self.preproc(mosaic_img, mosaic_labels, input_dim) 
+        #         img_info = (mix_img.shape[1], mix_img.shape[0])
 
-                # -----------------------------------------------------------------
-                # img_info and img_id are not used for training.
-                # They are also hard to be specified on a mosaic image.
-                # -----------------------------------------------------------------
-                return mix_img, padded_labels, img_info, img_id
-        else:
+        #         # -----------------------------------------------------------------
+        #         # img_info and img_id are not used for training.
+        #         # They are also hard to be specified on a mosaic image.
+        #         # -----------------------------------------------------------------
+        #         return mix_img, padded_labels, img_info, img_id
+        if self.enable_mosaic and random.random() < self.mosaic_prob:
             # This gets me an image and target from the base dataset.
             img, target = self._dataset[idx]
             input_dim = (self._dataset.im_size[0], self._dataset.im_size[1]) # (h, w)
