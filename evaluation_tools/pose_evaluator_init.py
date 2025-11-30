@@ -9,6 +9,7 @@ import json
 import evaluation_tools.model_tools as model_tools
 from evaluation_tools.pose_evaluator import PoseEvaluator
 from evaluation_tools.pose_evaluator_lmo import PoseEvaluatorLMO
+from evaluation_tools.better_pose_eval import PoseEvaluator as BetterPoseEvaluator
 
 
 # Functions to initialize the PoseEvaluator module
@@ -71,6 +72,27 @@ def load_model_symmetry(path, classes):
 
 
 def build_pose_evaluator(args):
+    """
+    Function to build the Pose Evaluator by loading the 3D point clouds and additional information.
+    """
+    classes_path = args.dataset_path + args.class_info
+    classes = load_classes(classes_path)
+
+    models_path = args.dataset_path + args.models
+    models, models_info = load_models(models_path, classes)
+
+    symmetries_path = args.dataset_path + args.model_symmetry
+    model_symmetry = load_model_symmetry(symmetries_path, classes)
+    classes = [classes[k] for k in classes]
+    if args.dataset_file == 'ycbv':
+        evaluator = PoseEvaluator(models, classes, models_info, model_symmetry)
+    elif args.dataset_file == 'lmo':
+        evaluator = PoseEvaluatorLMO(models, classes, models_info, model_symmetry)
+    else:
+        raise ValueError("Unknown dataset.")
+    return evaluator
+
+def build_better_pose_evaluator(args):
     """
     Function to build the Pose Evaluator by loading the 3D point clouds and additional information.
     """

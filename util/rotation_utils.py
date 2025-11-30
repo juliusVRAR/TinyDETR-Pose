@@ -429,12 +429,12 @@ def rotation_6d_to_matrix(rot_6d):
         raise ValueError("Input rot_6d must be of shape (B,Q,6) or (D,B,Q,6)")
     
     rot_6d = rot_6d.view(-1, 6)
-    m1 = rot_6d[:, 0:3]
-    m2 = rot_6d[:, 3:6]
+    x_raw = rot_6d[:, 0:3]
+    y_raw = rot_6d[:, 3:6]
     # From poet, they assume x and z rotation vectors, and compute y as cross product.
     # TODO: Is that a problem?
-    x = F.normalize(m1, p=2, dim=1)
-    z = torch.cross(x, m2, dim=1)
+    x = F.normalize(x_raw, p=2, dim=1)
+    z = torch.cross(x, y_raw, dim=1)
     z = F.normalize(z, p=2, dim=1)
     y = torch.cross(z, x, dim=1)
     rot_matrix = torch.cat((x.view(-1, 3, 1), y.view(-1, 3, 1), z.view(-1, 3, 1)), 2)  # Rotation Matrix lying in the SO(3)

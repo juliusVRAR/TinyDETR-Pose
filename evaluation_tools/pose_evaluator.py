@@ -76,7 +76,7 @@ class PoseEvaluator(object):
         if os.path.exists(output_dir):
             shutil.rmtree(output_dir)
         os.makedirs(output_dir)
-
+        
         log_file = open(output_path + "adds/adds.log", 'w')
         json_file = open(output_path + "adds/adds.json", 'w')
 

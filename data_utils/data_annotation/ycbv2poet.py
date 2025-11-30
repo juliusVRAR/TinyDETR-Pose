@@ -155,7 +155,7 @@ for data_path, img_type in zip(data_paths, img_types):
                 if bbox['visib_fract'] < 0.05:
                     annotations_removed += 1
                     continue
-                # Check if bbox starts / ends outside of image --> set to 0 or img boundary simply
+                # Check if bbox starts / ends ouatside of imge --> set to 0 or img boundary simply
                 x1 = bbox['bbox_obj'][0]
                 y1 = bbox['bbox_obj'][1]
                 x2 = bbox['bbox_obj'][0] + bbox['bbox_obj'][2]

@@ -34,7 +34,7 @@ from util.get_param_dicts import get_param_dict
 import util.misc as utils
 from util.utils import ModelEma, BestMetricHolder, clean_state_dict
 from util.benchmark import benchmark
-from evaluation_tools.pose_evaluator_init import build_pose_evaluator
+from evaluation_tools.pose_evaluator_init import build_pose_evaluator, build_better_pose_evaluator
 from torch.utils.tensorboard import SummaryWriter
 
 def get_args_parser():
@@ -116,19 +116,21 @@ def get_args_parser():
     parser.add_argument('--bbox_reparam', action='store_true')
 
     # * Matcher
-    parser.add_argument('--set_cost_class', default=2, type=float,
+    parser.add_argument('--set_cost_class', default=2., type=float,
                         help="Class coefficient in the matching cost")
-    parser.add_argument('--set_cost_bbox', default=5, type=float,
+    parser.add_argument('--set_cost_bbox', default=5., type=float,
                         help="L1 box coefficient in the matching cost")
-    parser.add_argument('--set_cost_giou', default=2, type=float,
+    parser.add_argument('--set_cost_giou', default=2., type=float,
                         help="giou box coefficient in the matching cost")
-    parser.add_argument('--set_cost_rotation', default=1, type=float,
+    parser.add_argument('--set_cost_rotation', default=2.0, type=float,
                         help="rotation coefficient in the matching cost")
-    parser.add_argument('--set_cost_keypoint', default=10, type=float,
+    parser.add_argument('--set_cost_translation', default=5., type=float,
+                        help="translation coefficient in the matching cost")
+    parser.add_argument('--set_cost_keypoint', default=10., type=float,
                         help="keypoint coefficient in the matching cost")
-    parser.add_argument('--matcher_type', default='6d', choices=['pose', '6d', 'hungarian'], type=str,
+    parser.add_argument('--matcher_type', default='6d', choices=['6d', 'hungarian', 'yopo'], type=str,
                         help="Type of matcher to use, hungarian is the 3d match from lwdetr and will probably not work")
-
+    
     # PoET Config
     parser.add_argument('--bbox_mode', default='backbone', type=str, choices=('gt', 'backbone', 'jitter'),
                         help='Defines which bounding boxes should be used for PoET to determine query embeddings.')
@@ -192,7 +194,7 @@ def get_args_parser():
     parser.add_argument('--grayscale', action='store_true', help='Activate grayscale augmentation.')
     
     # Data augmentations TODO: add yolox6d 
-    parser.add_argument('--mosaic', action='store_true',
+    parser.add_argument('--mosaic_augmentation', action='store_true',
                         help='Whether to use mosaic augmentation (from yolox6d).')
     # output and logging
     parser.add_argument('--output_dir', default='output',
@@ -289,8 +291,8 @@ def main(args):
     model, criterion, postprocessors, matcher = build_model(args)
     model.to(device)
 
-    pose_evaluator = build_pose_evaluator(args)
-    
+    #pose_evaluator = build_pose_evaluator(args)
+    pose_evaluator = build_better_pose_evaluator(args)
     if args.use_ema:
         ema_m = ModelEma(model, decay=args.ema_decay)
     else:
@@ -424,16 +426,18 @@ def main(args):
             args.start_epoch = checkpoint['epoch'] + 1
 
     if args.eval:
+        # print("COCO Eval.")
         # test_stats, coco_evaluator = evaluate(
-        #     model, criterion, postprocessors, data_loader_val, base_ds, device, args)
+        #     model, criterion, postprocessors, data_loader_val_coco, base_ds, device, args)
         # if args.output_dir:
         #     utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         if args.resume:
             eval_epoch = checkpoint['epoch']
         else:
             eval_epoch = None
-        #pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
-         #             args.rotation_representation, device, args.output_dir, eval_epoch)
+        
+        pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
+                      args.rotation_representation, device, args.output_dir, eval_epoch)
         return
     # Evaluate the model for the BOP challenge
     if args.eval_bop:

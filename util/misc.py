@@ -276,10 +276,37 @@ def get_sha():
     return message
 
 
+# def collate_fn(batch):
+#     batch = list(zip(*batch))
+#     batch[0] = nested_tensor_from_tensor_list(batch[0])
+#     return tuple(batch)
+
 def collate_fn(batch):
-    batch = list(zip(*batch))
-    batch[0] = nested_tensor_from_tensor_list(batch[0])
-    return tuple(batch)
+    # batch: list of tuples (image_tensor, target_dict)
+    images, targets = list(zip(*batch))  # images: tuple[T], targets: tuple[dict]
+    # Collect per-sample intrinsics into (B,3,3)
+    Ks = []
+    for t in targets:
+        intr = t.get("intrinsics", None)
+        if intr is None:
+            Ks.append(torch.eye(3, dtype=torch.float32))
+            continue
+        if torch.is_tensor(intr):
+            if intr.ndim == 1 and intr.numel() == 9:
+                Ks.append(intr.view(3, 3).float())
+            elif intr.ndim == 2 and intr.shape == (3, 3):
+                Ks.append(intr.float())
+            elif intr.ndim == 2 and intr.shape[-1] == 9:
+                Ks.append(intr[0].view(3, 3).float())
+            else:
+                raise ValueError(f"Unsupported intrinsics shape: {intr.shape}")
+        else:
+            intr_np = torch.as_tensor(intr, dtype=torch.float32)
+            Ks.append(intr_np.view(3, 3) if intr_np.numel() == 9 else intr_np)
+    K_batch = torch.stack(Ks, dim=0)  # (B,3,3)
+
+    samples = nested_tensor_from_tensor_list(list(images), meta_list={"K": K_batch})
+    return samples, list(targets)
 
 
 def _max_by_axis(the_list):
@@ -292,10 +319,10 @@ def _max_by_axis(the_list):
 
 
 class NestedTensor(object):
-    def __init__(self, tensors, mask: Optional[Tensor]):
+    def __init__(self, tensors, mask: Optional[Tensor], meta: Optional[dict] = None):
         self.tensors = tensors
         self.mask = mask
-
+        self.meta = meta or {}
     def to(self, device):
         # type: (Device) -> NestedTensor # noqa
         cast_tensor = self.tensors.to(device)
@@ -305,16 +332,17 @@ class NestedTensor(object):
             cast_mask = mask.to(device)
         else:
             cast_mask = None
-        return NestedTensor(cast_tensor, cast_mask)
+        meta = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in self.meta.items()}
+        return NestedTensor(cast_tensor, cast_mask, meta)
 
     def decompose(self):
-        return self.tensors, self.mask
+        return self.tensors, self.mask, self.meta
 
     def __repr__(self):
         return str(self.tensors)
 
 
-def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
+def nested_tensor_from_tensor_list(tensor_list: List[Tensor], meta_list=None):
     # TODO make this more general
     if tensor_list[0].ndim == 3:
         if torchvision._is_tracing():
@@ -336,7 +364,7 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
             m[: img.shape[1], :img.shape[2]] = False
     else:
         raise ValueError('not supported')
-    return NestedTensor(tensor, mask)
+    return NestedTensor(tensor, mask, meta=meta_list or {})
 
 
 # _onnx_nested_tensor_from_tensor_list() is an implementation of

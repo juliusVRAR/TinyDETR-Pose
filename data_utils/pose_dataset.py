@@ -329,7 +329,6 @@ def convert_coco_poly_to_mask(segmentations, height, width):
     return masks
 
 
-
 class ProcessPoseData(object):
     """
     Processes the annotation file and brings it in the right format for the pose estimation task.
@@ -449,8 +448,8 @@ class ProcessPoseData(object):
             v = fy * (Y / Z) + cy
             object_center_2d = torch.stack([u, v], dim=1)  # pixels
         # Dont normalize here, do it later if needed in the model
-        centers_img = draw_object_centers(image, object_center_2d)
-        cv2.imwrite(str(Path(DEBUG_OUT, "object_centers.png")), centers_img)
+        #centers_img = draw_object_centers(image, object_center_2d)
+        #cv2.imwrite(str(Path(DEBUG_OUT, "object_centers.png")), centers_img)
         # ------------------------------------------------------------------
 
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
@@ -616,10 +615,10 @@ class MosaicDetection(PoseDataset):
         dataset, 
         mosaic=True, 
         preproc=None,
-        degrees=5.0, 
-        translate=0.0,
-        mosaic_scale=(1., 1.),
-        mixup_scale=(0.5, 1.5), 
+        degrees=10.0, 
+        translate=0.1,
+        mosaic_scale=(0.9, 1.1),
+        mixup_scale=(1., 1.), 
         shear=0.0, 
         enable_mixup=True,
         mosaic_prob=0.0, 
@@ -971,7 +970,7 @@ def build(image_set, args):
         "train_synt": (root, root / "annotations" / f'train_synt.json'),
         "train_pbr": (root , root / "annotations" / f'train_pbr.json'),
         "test": (root , root / "annotations" / f'test.json'), # TODO: Whats wrong here?
-        "keyframes": (root, root / "annotations" / f'keyframes.json'),
+        "keyframesd": (root, root / "annotations" / f'keyframes.json'),
         "keyframes_bop": (root, root / "annotations"/ f'keyframes_bop.json'),
         "val": (root , root / "annotations" / f'val.json'),
     }
@@ -1016,13 +1015,13 @@ def build(image_set, args):
                           local_rank=get_local_rank(),
                           local_size=get_local_size(),
                           image_set=image_set,
-                          use_mosaic=args.mosaic,
+                          use_mosaic=args.mosaic_augmentation,
                           cad_models_path=cad_model_path,
                           model_symmetry=model_symmetry,
                           class_info=class_info,
                           mesh_point_seed=0)
     
-    if args.mosaic and 'train' in image_set:
+    if args.mosaic_augmentation and 'train' in image_set:
         print("Creating Mosaic Augmentation")
         dataset_mosaic = MosaicDetection(
                 dataset,

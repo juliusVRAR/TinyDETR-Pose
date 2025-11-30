@@ -47,7 +47,8 @@ class LWDETR6D(nn.Module):
                  two_stage=False,
                  lite_refpoint_refine=False,
                  bbox_reparam=False,
-                 rotation_mode='6d'):
+                 rotation_mode='6d',
+                 ):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -65,7 +66,6 @@ class LWDETR6D(nn.Module):
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-
         query_dim=4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
         self.query_feat = nn.Embedding(num_queries * group_detr, hidden_dim)
@@ -74,7 +74,8 @@ class LWDETR6D(nn.Module):
         self.backbone = backbone
         self.aux_loss = aux_loss
         self.group_detr = group_detr
-
+        
+        
         # iter update
         self.lite_refpoint_refine = lite_refpoint_refine
         if not self.lite_refpoint_refine:
@@ -221,7 +222,7 @@ class LWDETR6D(nn.Module):
         print(f">> Class Head initialized with bias -4.6 (Prob 0.01)")
         print(">> Pose Heads Initialized: Z-Uncertainty set high, XY centered.")
         
-    def forward(self, samples: NestedTensor, targets=None):
+    def forward(self, samples: NestedTensor, targets = None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -236,10 +237,13 @@ class LWDETR6D(nn.Module):
                - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
                                 dictionnaries containing the two above keys for each decoder layer.
         """
+        # -----------------------------------------------------------
+        # 1. Backbone + Transformer (Standard DETR)
+        # -----------------------------------------------------------
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
         features, poss = self.backbone(samples)
-        # Camera intrinsics (assumed pixels)
+        # Backup camera intrinsics (assumed pixels) for benchmark testing
         K = {
             "cx": 312.9869,
             "cy": 241.3109,
@@ -251,12 +255,16 @@ class LWDETR6D(nn.Module):
         }
         srcs = []
         masks = []
+        metas = []
         for l, feat in enumerate(features):
-            src, mask = feat.decompose()
+            src, mask, meta = feat.decompose()
             srcs.append(src)
             masks.append(mask)
+            metas.append(meta) # Camera matries 
             assert mask is not None
-
+        # -----------------------------------------------------------
+        # 2. Get Raw Head Outputs
+        # -----------------------------------------------------------
         if self.training:
             refpoint_embed_weight = self.refpoint_embed.weight
             query_feat_weight = self.query_feat.weight
@@ -296,10 +304,12 @@ class LWDETR6D(nn.Module):
 
         # Gram-Schmidt representation
         output_rots = torch.cat([rot_c1, rot_c2], dim=3)
-        # Prepare pred translation for criterion
-        output_trans = self.dec_trans_head(hs)
-        output_uv_norm = self.dec_trans_xy_head(output_trans).sigmoid()
         
+
+        output_trans = self.dec_trans_head(hs)
+        # Prepare pred translation for criterion
+        output_uv_norm = self.dec_trans_xy_head(output_trans).sigmoid()
+        #trans_z
         # Prepare pred translation z for monocular depth estimation.
         z_out = self.dec_trans_z_head(output_trans)
         # Split the output:
@@ -308,19 +318,35 @@ class LWDETR6D(nn.Module):
         # Channel 1: Uncertainty (Log Variance) - No activation needed
         output_z_log_var = z_out[..., 1]
         pred_tz = output_norm_z * self.max_depth # Pred z in meters
-
-        img_h, img_w = K['height'], K['width']
+        #The backprojection has to happen on to the padded img not on the orginal size
+        img_h, img_w = samples.tensors.shape[-2:]
         u = output_uv_norm[..., 0:1] * img_w
         v = output_uv_norm[..., 1:2] * img_h
+        
+        # -----------------------------------------------------------
+        # 3. The "Anti-Bias" Math Layer (Back-Projection)
+        # -----------------------------------------------------------
         # Unpack Intrinsics (broadcast to match num_queries)
-        fx = K['fx']
-        fy = K['fy']
-        cx = K['cx']
-        cy = K['cy']
-        # Apply Pinhole Formula to get x,y in meters
-        pred_tx = (u - cx) * pred_tz.unsqueeze(-1) / fx
-        pred_ty = (v - cy) * pred_tz.unsqueeze(-1) / fy
-        output_trans = torch.cat([pred_tx, pred_ty, pred_tz.unsqueeze(-1)], dim=-1)
+        # Empty in test run (benchmark testing)
+        if len(samples.meta) != 0:
+            intrinsics = samples.meta['K']
+            fx = intrinsics[:, 0, 0].reshape(1, -1, 1)
+            fy = intrinsics[:, 1, 1].reshape(1, -1, 1)
+            cx = intrinsics[:, 0, 2].reshape(1, -1, 1)
+            cy = intrinsics[:, 1, 2].reshape(1, -1, 1)
+            pred_tx = (u.squeeze(-1) - cx) * pred_tz / fx
+            pred_ty = (v.squeeze(-1) - cy) * pred_tz / fy
+            output_trans = torch.cat([pred_tx.unsqueeze(-1), pred_ty.unsqueeze(-1), pred_tz.unsqueeze(-1)], dim=-1)
+        else: # Backup matrix for benchmark testing
+            fx = K['fx']
+            fy = K['fy']
+            cx = K['cx']
+            cy = K['cy']
+            pred_tz = pred_tz.unsqueeze(-1)  # Add batch dim for broadcasting
+            # Apply Pinhole Formula to get x,y in meters
+            pred_tx = (u - cx) * pred_tz / fx
+            pred_ty = (v - cy) * pred_tz / fy
+            output_trans = torch.cat([pred_tx, pred_ty, pred_tz], dim=-1)
 
         # Postprocess output_rots for loss
         output_rots = self.process_rotation(output_rots)
@@ -366,23 +392,28 @@ class LWDETR6D(nn.Module):
                 # Channel 1: Uncertainty (Log Variance) - No activation needed
                 z_log_var_enc = z_out_enc[..., 1]
                 trans_enc_z = norm_z_enc * self.max_depth # Pred z in meters
+                
+                if len(samples.meta) != 0:
+                    trans_enc_x = (u.squeeze(-1) - cx) * trans_enc_z / fx
+                    trans_enc_y = (v.squeeze(-1) - cy) * trans_enc_z / fy
+                    trans_enc = torch.cat([trans_enc_x, trans_enc_y, trans_enc_z.unsqueeze(0)]).permute(1,2,0)
+                else: # Backup matrix for benchmark testing
+                    trans_enc_x = (u - cx) * trans_enc_z.unsqueeze(-1)  / fx
+                    trans_enc_y = (v - cy) * trans_enc_z.unsqueeze(-1)  / fy
+                    trans_enc = torch.cat([trans_enc_x, trans_enc_y, trans_enc_z.unsqueeze(-1)], dim=-1)
 
-
-                trans_enc_x = (u - cx) * trans_enc_z.unsqueeze(-1)  / fx
-                trans_enc_y = (v - cy) * trans_enc_z.unsqueeze(-1)  / fy
-                trans_enc = torch.cat([trans_enc_x, trans_enc_y, trans_enc_z.unsqueeze(-1)], dim=-1)
                 kpt_enc_list.append(uv_norm_enc)
-                trans_enc_list.append(trans_enc)  # (B, num_queries, 2)
+                trans_enc_list.append(trans_enc)
                 log_var_z_list.append(z_log_var_enc)
                 trans_enc_z_list.append(trans_enc_z)
             cls_enc = torch.cat(cls_enc, dim=1)
             rot_enc = torch.cat(rot_enc_list, dim=1)            # (B, total_queries, rot_dim)
-            # TODO: How do we achive the same as in outputs above?
+            
             trans_enc = torch.cat(trans_enc_list, dim=1)      # (B, total_queries, 3)
             z_log_var_enc = torch.cat(log_var_z_list, dim=1)  # (B, total_queries, 1)
             trans_enc_z = torch.cat(trans_enc_z_list, dim=1)  # (B, total_queries, 1)
             kpt_enc = torch.cat(kpt_enc_list, dim=1)          # (B, total_queries, 2)
-            # What axis are these ?
+            
             rot_c1 = F.normalize(rot_enc[..., :3], dim=-1) 
             rot_c2 = F.normalize(rot_enc[..., 3:] - torch.sum(rot_c1 * rot_enc[..., :3], dim=-1, keepdim=True) * rot_c1, dim=-1) 
             rot_enc_full = torch.cat([rot_c1, rot_c2], dim=-1)          # (B, total_queries, 6)
@@ -1754,6 +1785,7 @@ def build(args):
         rotation_mode="6d",
     )
     load_pretrained_weights(model, Path(args.pretrain_weights))
+    
     if  args.resume is None:
         model.init_pose_heads()
     else: 

@@ -343,6 +343,7 @@ class Normalize(object):
             boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
             target["boxes"] = boxes
             # Also normalize obj centers
+        if "object_center_2d" in target:
             obj_centers = target['object_center_2d']
             obj_centers = obj_centers / torch.tensor([w, h], dtype=torch.float32)
             target['object_center_2d'] = obj_centers

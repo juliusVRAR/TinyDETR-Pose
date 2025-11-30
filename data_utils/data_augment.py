@@ -11,11 +11,13 @@ http://arxiv.org/abs/1512.02325
 
 import math
 import random
+from matplotlib import image
 from torchvision.io import write_png
 import cv2
 import numpy as np
 import torch
 from util.box_ops import box_xyxy_to_cxcywh
+import data_utils.transforms as T
 from PIL import Image
 from pathlib import Path
 from util.utils import save_annotated_image, camera_params_to_K, pad_to_size
@@ -23,6 +25,42 @@ from util.visualize_object_pose import visualize_object_keypoints, YCBVVisualize
 DEBUG = False
 DEBUG_OUT=Path("debug")
 CAD_MODELS = Path("/workspace/LWDETR/data/datasets/bop/models")
+
+
+def draw_object_centers(img_input, centers_xy, radius=4, color=(0, 255, 0)):
+    """
+    Draw circles for object centers.
+    Accepts:
+      - torch.Tensor (C,H,W) in [0,1]
+      - PIL.Image
+      - np.ndarray (H,W,C) uint8 RGB or BGR
+    centers_xy: (N,2) pixel coords (u,v)
+    Returns BGR uint8 ndarray.
+    """
+    if centers_xy is None or len(centers_xy) == 0:
+        # Just convert and return
+        if isinstance(img_input, torch.Tensor):
+            img = (img_input.permute(1,2,0).numpy().clip(0,1) * 255).astype(np.uint8)
+        elif isinstance(img_input, Image.Image):
+            img = np.array(img_input)
+        else:
+            img = img_input
+        return img[..., ::-1].copy()  # BGR
+    # Normalize input to RGB uint8
+    if isinstance(img_input, torch.Tensor):
+        img = (img_input.permute(1,2,0).numpy().clip(0,1) * 255).astype(np.uint8)
+    elif isinstance(img_input, Image.Image):
+        img = np.array(img_input)
+    else:
+        img = img_input
+    # If grayscale expand
+    if img.ndim == 2:
+        img = np.repeat(img[:, :, None], 3, axis=2)
+    # Assume current img is RGB; convert to BGR for OpenCV drawing
+    img_bgr = img[..., ::-1].copy()
+    for (u, v) in centers_xy.tolist():
+        cv2.circle(img_bgr, (int(round(u)), int(round(v))), radius, color, -1, lineType=cv2.LINE_AA)
+    return img_bgr
 
 def augment_hsv(img, hgain=5, sgain=30, vgain=30):
     hsv_augs = np.random.uniform(-1, 1, 3) * [hgain, sgain, vgain]  # random gains
@@ -140,26 +178,44 @@ def apply_affine_to_kpts(targets, target_size, M, scale, num_kpts=17):
     return targets
 
 
-
-
-def apply_affine_to_object_pose(targets, 
-                                rotation,
+def apply_affine_to_object_pose(obj_center_2d, 
                                 translation, 
-                                target_size, # wh
-                                M, 
-                                scale, 
-                                angle):
+                                rotation,
+                                K,
+                                M, scale, angle, im_size):
     # Number of bboxes in targets, also the number of annotations in the current sample.
-    num_gts = len(targets)
-    test = translation.copy()
-    # warp object center points [tx, ty]
-    twidth, theight = target_size
-    # Transform translation
-    target_trans = np.ones((num_gts, 3)) # Create homogeneous 2D point array (x,y,1) per object.
-    translation = translation * 1000.0  # The dataset is in mm convert back to m.
-    target_trans[:, :2] = translation[:, -3:-1] # Copy current 2D translation (tx, ty) from last 3 columns (assumed [tx,ty,tz]).
-    target_trans = target_trans @ M.T  # Apply 2x3 affine matrix M: (x',y') = M * (x,y,1).
-    translation[:, -3:-1] = target_trans[:, :2] # Copy back transformed 2D translation (tx', ty').
+    
+    obj_center_2d[:,0] = obj_center_2d[:,0] * im_size[0]    # u = x * W
+    obj_center_2d[:,1] = obj_center_2d[:,1] * im_size[1]   # v = y * H
+    ones = np.ones((obj_center_2d.shape[0], 1), dtype=obj_center_2d.dtype)
+    pts_h = np.concatenate([obj_center_2d, ones], axis=1)   # (N,3)
+    obj_center_2d = pts_h @ M.T  # Apply 2x3 affine matrix M: (x',y') = M * (x,y,1).
+    # transform depth
+    # There is no change in depth for rotation around z axis. Scaling reduces depth by the amount of scaling
+    translation = translation * 1000.0  # The dataset is in m convert back to mm.
+    # Adjust depth (tz) inversely to image scaling.
+    translation_z = translation[:, 2] / scale
+    translation_x = translation[:, 0:1]  # (N,2)
+    translation_y = translation[:, 1:2]
+    fx = K[0,0]
+    fy = K[1,1]
+    cx = K[0,2]
+    cy = K[1,2]
+    
+    # Apply Pinhole Formula to get x,y in meters
+    translation_x = (obj_center_2d[:,0]  - cx) * translation_z / fx
+    translation_y = (obj_center_2d[:,1] - cy) * translation_z / fy
+    # Ensure column vectors (N,1) then concatenate to (N,3)
+    translation_x = translation_x[:, None]   # (N,1)
+    translation_y = translation_y[:, None]   # (N,1)
+    translation_z = translation_z[:, None]   # (N,1)
+    translation = np.concatenate([translation_x, translation_y, translation_z], axis=1)
+    
+    
+
+    # Back to mm
+    translation = translation / 1000.0
+    
     ###########
     #transform Rotation
     ### This is not necessary we have the full rotation matrix already
@@ -173,13 +229,8 @@ def apply_affine_to_object_pose(targets,
     rotation_mat = deltaR @ rotation_mat # Left-multiply: rotate pose about camera Z axis.
     rotation[:, 0:1] = rotation_mat[:, 0:1] # Store updated first rotation column back.
     rotation[:, 1:2] = rotation_mat[:, 1:2] # Store updated second rotation column back.
-    # transform depth
-    # There is no change in depth for rotation around z axis. Scaling reduces depth by the amount of scaling
-    translation[:, 2] = translation[:, 2] / (scale)  # Adjust depth (tz) inversely to image scaling.
-    # Back to mm
-    translation = translation / 1000.0
     
-    return translation, rotation
+    return obj_center_2d, translation, rotation
 
 def make_divisible_by_64(hw: tuple[int, int]) -> tuple[int, int]:
     h, w = hw
@@ -207,15 +258,16 @@ def random_affine_single(
     
     # make sure the image will be divisible by 64 after affine transformation for the ViT backbone
     # TODO: Decide if padding is better and leave the img size as is.
-    make_divisible_by_64(target_size)
+    #make_divisible_by_64(target_size)
+    # TODO: I K matrix always the right one?
+    K = target['intrinsics'][0].reshape(3, 3).float().numpy()
     M, scale, angle = get_affine_matrix(target_size, 
                                         degrees, 
                                         translate, 
                                         scales, 
                                         shear,                    
                                         camera_matrix)
-    # M = np.array([[1.0, 0.0, 12.34587156],
-    #             [0.0, 1.0, 73.34484229]], dtype=float)
+  
     
     # to CHW
     img = img.permute(1,2,0) # to HWC
@@ -248,9 +300,8 @@ def random_affine_single(
         affine_boxes = apply_affine_to_bboxes(affine_boxes, 
                                          (target_size[1],target_size[0]), 
                                          M)
-        # TODO: Convert back to normalized xywh adn update target['boxes']
-        affine_boxes= torch.from_numpy(affine_boxes)   
-        if DEBUG: # Visualize after bbox affine trafos
+        
+        if DEBUG: 
             debug_img = img[:,:,::-1].copy()  # BGR to RGB
             debug_img = torch.from_numpy(debug_img)
             debug_img = debug_img.permute(2,0,1) # to CHW
@@ -261,42 +312,45 @@ def random_affine_single(
                     labels=target['labels'],
                     out_path=Path(DEBUG_OUT,"after_random_affine",f"bboxes_ids.png")
                 )
-                      
-        affine_trans, affine_rot = apply_affine_to_object_pose(targets=target["boxes"],
-                                                                   rotation=target["relative_rotation"].numpy(),
-                                                                   translation=target["relative_position"].numpy(),
-                                                                   target_size=(target_size[1],target_size[0]),
-                                                                   M=M, 
-                                                                   scale=scale, 
-                                                                   angle=angle)
+        #Convert back to normalized xywh and update target['boxes']
+        affine_boxes= torch.from_numpy(affine_boxes).to(dtype=torch.float32)
+        affine_boxes = box_xyxy_to_cxcywh(affine_boxes)
+        affine_boxes = affine_boxes / torch.tensor([img.shape[1], img.shape[0], img.shape[1], img.shape[0]], dtype=torch.float32)   
         
-        # img_cuboid, img_mask, img_2dod = draw_6d_pose(img=img, 
-        #                                             data_list=target,
-        #                                             camera_matrix=camera_matrix)
-
-
+        obj_center_2d, affine_trans, affine_rot = apply_affine_to_object_pose(obj_center_2d=target["object_center_2d"].numpy(),
+                                                                                rotation=target["relative_rotation"].numpy(),
+                                                                                translation=target["relative_position"].numpy(),
+                                                                                M=M,
+                                                                                K=K,
+                                                                                scale=scale, 
+                                                                                angle=angle,
+                                                                                im_size=(target_size[1],target_size[0])
+                                                                                )
+        
+        target["boxes"] = affine_boxes
+        # Normalize Object centers to (0,1)
+        obj_center_2d = torch.from_numpy(obj_center_2d).to(torch.float32)
+        obj_center_2d = obj_center_2d / torch.tensor([img.shape[1], img.shape[0],], dtype=torch.float32)
+        # Finally update the target and image_tensor and return
+        target['object_center_2d'] = obj_center_2d
+        target['relative_position'] = torch.from_numpy(affine_trans)
+        target['relative_rotation'] = torch.from_numpy(affine_rot)
         if DEBUG:
+            
             debug_img_2 = img.copy()
-            debug_img_2, _ = visualize_object_keypoints(
-                cam=camera_matrix,
-                targets= {"relative_position":torch.from_numpy(affine_trans), 
-                          "relative_rotation":torch.from_numpy(affine_rot),
-                          'labels': target['labels'],
-                           "intrinsics": target['intrinsics']
-                          },
-                image=debug_img_2,
-                obj_infos_by_label=target['labels']
-            )
+             
+            debug_img_2 = draw_object_centers(debug_img_2, target['object_center_2d'])
+            
             cv2.imwrite(Path(DEBUG_OUT, "after_random_affine", f"keypoints.png"), debug_img_2)
 
-           # Visualize 3D bbox and cad model overlay
+            # Visualize 3D bbox and cad model overlay
             viz = YCBVVisualizer(CAD_MODELS)
             K = camera_params_to_K(camera_matrix)
             vis_img = img
             vis_img = viz.visualize_single_image(vis_img, 
                                                 annotations={'labels': target['labels'], 
-                                                            "relative_position":affine_trans, 
-                                                            "relative_rotation":affine_rot,
+                                                            "relative_position":target['relative_position'], 
+                                                            "relative_rotation":target['relative_rotation'],
                                                             },
                                                             K=K,
                                                             show_mesh=True,
@@ -304,9 +358,7 @@ def random_affine_single(
 
             cv2.imwrite(Path(DEBUG_OUT, "after_random_affine", "vis3d.png"), 
                         vis_img) # Visualization of 3D bboxes and overalayed objects
-    # Finally update the target and image_tensor and return
-    target['relative_position'] = torch.from_numpy(affine_trans)
-    target['relative_rotation'] = torch.from_numpy(affine_rot)
+    
     
     img_tensor = torch.from_numpy(img).to(torch.uint8).permute(2, 0, 1)  # CHW
     img_tensor = img_tensor[[2, 1, 0], :, :]
