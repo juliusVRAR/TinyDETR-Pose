@@ -883,9 +883,10 @@ class MosaicDetection(PoseDataset):
         #         # They are also hard to be specified on a mosaic image.
         #         # -----------------------------------------------------------------
         #         return mix_img, padded_labels, img_info, img_id
+        # This gets me an image and target from the base dataset.
+        img, target = self._dataset[idx]
         if self.enable_mosaic and random.random() < self.mosaic_prob:
-            # This gets me an image and target from the base dataset.
-            img, target = self._dataset[idx]
+            
             input_dim = (self._dataset.im_size[0], self._dataset.im_size[1]) # (h, w)
             input_dim = (target['size'][0].item(), target['size'][1].item()) # (h, w) ycbv im size
             input_h, input_w = input_dim[0], input_dim[1]
@@ -958,6 +959,8 @@ class MosaicDetection(PoseDataset):
             # Other augs?     
             #img, label = self.preproc(img, target, input_dim)
             
+            return img, target
+        else:
             return img, target
 
 
