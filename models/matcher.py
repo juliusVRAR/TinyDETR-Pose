@@ -204,9 +204,12 @@ class Matcher6D(nn.Module):
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
-        
-        tgt_keypoint = torch.cat([v["object_center_2d"] for v in targets], dim=0)  # shape: [N, 2]
-
+        if ("object_center_2d" in targets[0]) and (targets[0]["object_center_2d"] is not None):
+            tgt_keypoint = torch.cat([v["object_center_2d"] for v in targets], dim=0)  # shape: [N, 2]
+            # Compute the L1 cost between object keypoints (projected uv coords derived from xy translations)
+            cost_keypoint = torch.cdist(out_keypoint, tgt_keypoint, p=1) 
+        else:
+            cost_keypoint = 0.0
         # Compute the classification cost. Contrary to the loss, we don't use the NLL,
         # but approximate it in 1 - proba[target class].
         # The 1 is a constant that doesn't change the matching, it can be ommitted.
@@ -216,8 +219,6 @@ class Matcher6D(nn.Module):
         # Compute the giou cost betwen boxes
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
-         # Compute the L1 cost between object keypoints (projected uv coords derived from xy translations)
-        cost_keypoint = torch.cdist(out_keypoint, tgt_keypoint, p=1) 
         
         # Add to total cost
         # Initialize final cost matrix
