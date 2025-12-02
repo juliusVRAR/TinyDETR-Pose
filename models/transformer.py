@@ -179,29 +179,29 @@ class Transformer(nn.Module):
         else:
             raise NotImplementedError('Rotational representation is not supported.')
 
-        self.dec_rot_head  = nn.ModuleList([MLP(input_dim=d_model, 
-                                                hidden_dim=d_model, 
-                                                output_dim=self.rot_dim,
-                                                num_layers=3) 
-                                                for _ in range(group_detr)])
-        # Translation head xyz
-        self.dec_trans_head = nn.ModuleList([MLP(input_dim=d_model, 
-                                                 hidden_dim=d_model, 
-                                                 output_dim=self.t_dim, 
-                                                 num_layers=2) 
-                                                 for _ in range(group_detr)])
-         # Translation head xy
-        self.dec_trans_xy_head = nn.ModuleList([MLP(input_dim=d_model, 
-                                                    hidden_dim=d_model, 
-                                                    output_dim=self.xy_dim, 
-                                                    num_layers=1) 
-                                                    for _ in range(group_detr)])
-         # Translation head z
-        self.dec_trans_z_head = nn.ModuleList([MLP(input_dim=d_model, 
-                                                    hidden_dim=d_model, 
-                                                    output_dim=self.z_dim, 
-                                                    num_layers=1) 
-                                                    for _ in range(group_detr)])
+        # self.dec_rot_head  = nn.ModuleList([MLP(input_dim=d_model, 
+        #                                         hidden_dim=d_model, 
+        #                                         output_dim=self.rot_dim,
+        #                                         num_layers=3) 
+        #                                         for _ in range(group_detr)])
+        # # Translation head xyz
+        # self.dec_trans_head = nn.ModuleList([MLP(input_dim=d_model, 
+        #                                          hidden_dim=d_model, 
+        #                                          output_dim=self.t_dim, 
+        #                                          num_layers=2) 
+        #                                          for _ in range(group_detr)])
+        #  # Translation head xy
+        # self.dec_trans_xy_head = nn.ModuleList([MLP(input_dim=d_model, 
+        #                                             hidden_dim=d_model, 
+        #                                             output_dim=self.xy_dim, 
+        #                                             num_layers=1) 
+        #                                             for _ in range(group_detr)])
+        #  # Translation head z
+        # self.dec_trans_z_head = nn.ModuleList([MLP(input_dim=d_model, 
+        #                                             hidden_dim=d_model, 
+        #                                             output_dim=self.z_dim, 
+        #                                             num_layers=1) 
+        #                                             for _ in range(group_detr)])
 
         ####################################################
         self._reset_parameters()
