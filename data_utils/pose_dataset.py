@@ -28,7 +28,7 @@ from pycocotools import mask as coco_mask
 from .torchvision_datasets import CocoDetection
 # LWDETR
 #from datasets.coco import CocoDetection
-from util.misc import get_local_rank, get_local_size
+from util.misc import get_local_rank
 from util.quaternion_ops import quat2rot, rot2quat
 from util.rotation_utils import rotation_matrix_to_gram_schmidt_6d, rotation_matrix_to_raw_6d, rotation_6d_to_matrix, precompute_points
 import data_utils.transforms as T
@@ -107,7 +107,7 @@ class PoseDataset(CocoDetection):
                  jitter_probability=0.5, 
                  std=0.02, 
                  cache_mode=False, 
-                 local_rank=0, local_size=1,
+                 local_rank=0,
                  image_set='train',
                  use_mosaic=False,
                  model_symmetry=None,
@@ -133,7 +133,6 @@ class PoseDataset(CocoDetection):
                                             synthetic_background,  
                                             cache_mode=cache_mode, 
                                             local_rank=local_rank, 
-                                            local_size=local_size, 
                                             )
         self._transforms = transforms
         self.prepare = ProcessPoseData(return_masks, camera)
@@ -1016,7 +1015,6 @@ def build(image_set, args):
                           jitter_probability=args.jitter_probability,
                           cache_mode=args.cache_mode,
                           local_rank=get_local_rank(),
-                          local_size=get_local_size(),
                           image_set=image_set,
                           use_mosaic=args.mosaic_augmentation,
                           cad_models_path=cad_model_path,
