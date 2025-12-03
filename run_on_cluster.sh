@@ -1,12 +1,14 @@
 #!/bin/bash
+#SBATCH --export=NUM_GPU=4
 #SBATCH --job-name=train_ycbv
-#SBATCH --gpus-per-node=1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=256G
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=128
+#SBATCH --mem=512G
 #SBATCH --time=30-00:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
-#SBATCH --export=DSNAME=bop_datasets,RES=sd,VRARHUB_MESHES=K0472_53030;K0475_53030
+
+
 
 DSNAME=lw_detr6d_data
 
@@ -42,7 +44,10 @@ rootless-docker run --gpus all --shm-size=256g \
     -v $PATH_TO_WEIGHTS:/workspace/LWDETR/data/weights \
     pc3163.igd.fraunhofer.de:4567/$IMAGE_NAME\
     bash -c "python /workspace/LWDETR/models/ops/setup.py build install && \
-            python /workspace/LWDETR/main.py \
+                python -u -m torch.distributed.launch \
+                    --nproc_per_node=$NUM_GPU \
+                    --use_env \     
+                    /workspace/LWDETR/main.py \
                                 --lr 1e-4 \
                                 --lr_transformer 2e-5 \
                                 --lr_encoder 1e-5 \
@@ -87,11 +92,11 @@ rootless-docker run --gpus all --shm-size=256g \
 
 ## OUTPUT
 # zip & copy the data back
-cd $OUTPATH/../
-zip -q -r $DSNAME.zip $DSNAME
-if test ! -z "$SLURM_JOB_ID"; then
-    XDG_RUNTIME_DIR=~/dbus
-    export DBUS_SESSION_BUS_ADDRESS=`dbus-daemon --fork --print-address --session`
-    gio mount smb://pc3163/nobackup < ~/smbcreds
-    gio copy --progress $DSNAME.zip smb://pc3163/nobackup/cache/$USER
-fi
+# cd $OUTPATH/../
+# zip -q -r $DSNAME.zip $DSNAME
+# if test ! -z "$SLURM_JOB_ID"; then
+#     XDG_RUNTIME_DIR=~/dbus
+#     export DBUS_SESSION_BUS_ADDRESS=`dbus-daemon --fork --print-address --session`
+#     gio mount smb://pc3163/nobackup < ~/smbcreds
+#     gio copy --progress $DSNAME.zip smb://pc3163/nobackup/cache/$USER
+# fi
