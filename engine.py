@@ -216,11 +216,11 @@ def pose_evaluate(model,
                   pose_evaluator, 
                   data_loader, 
                   image_set, 
-                  bbox_mode, 
-                  rotation_mode, 
+                  bbox_mode,  
                   device, 
                   output_dir, 
-                  epoch=None):
+                  epoch=None,
+                  quick_mode=False):
     """
     Evaluate PoET on the whole dataset, calculate the evaluation metrics and store the final performance.
     """
@@ -237,12 +237,27 @@ def pose_evaluate(model,
         output_eval_dir = output_dir + "/eval_" + image_set + "_" + bbox_mode + "/"
     Path(output_eval_dir).mkdir(parents=True, exist_ok=True)
 
-    print("Process validation dataset:")
+    print(f"Process validation dataset (Quick Mode: {quick_mode}):")
+    
+    # Calculate total images to process for accurate progress bar
+    total_len = len(data_loader)
     n_images = len(data_loader.dataset.ids)
+    
+    if quick_mode:
+        # If quick mode, we essentially skip 90% of batches
+        # Adjust n_images for accurate logging
+        n_images = int(n_images * 0.1)
+
     bs = data_loader.batch_size
     start_time = time.time()
     processed_images = 0
-    for samples, targets in data_loader:
+    # TODO: Add quick mode with 10% of the val dataset for fast eval while training.
+    for i, (samples, targets) in enumerate(data_loader):
+
+        # Skip 9 out of every 10 batches
+        if quick_mode and i % 10 != 0:
+            continue
+
         batch_start_time = time.time()
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -256,8 +271,6 @@ def pose_evaluate(model,
         pred_translations = outputs_without_aux["pred_translations"][idx].detach().cpu().numpy()
         pred_rotations = outputs_without_aux["pred_rotations"][idx].detach().cpu().numpy()
 
-        # if rotation_mode in ['quat', 'silho_quat']:
-        #     pred_rotations = quat2rot(pred_rotations)
 
         tgt_translations = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0).detach().cpu().numpy()
         tgt_rotations = torch.cat([t['relative_rotation'][i] for t, (_, i) in zip(targets, indices)], dim=0).detach().cpu().numpy()
@@ -281,13 +294,16 @@ def pose_evaluate(model,
         batch_total_time = time.time() - batch_start_time
         batch_total_time_str = str(datetime.timedelta(seconds=int(batch_total_time)))
         processed_images = processed_images + len(targets)
-        remaining_images = n_images - processed_images
+        # Logic to estimate remaining batches correctly
+        remaining_images = max(0, n_images - processed_images)
         remaining_batches = remaining_images / bs
         eta = batch_total_time * remaining_batches
         eta_str = str(datetime.timedelta(seconds=int(eta)))
         print("Processed {}/{} \t Batch Time: {} \t ETA: {}".format(processed_images, n_images, batch_total_time_str, eta_str))
     # At this point iterated over all validation images and for each object the result is fed into the pose evaluator
     total_time = time.time() - start_time
+    # Avoid division by zero if n_images is 0 (rare edge case)
+    n_images = max(1, n_images)
     time_per_img = total_time / n_images
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     time_per_img_str = str(datetime.timedelta(seconds=int(time_per_img)))

@@ -236,6 +236,8 @@ def get_args_parser():
                         help='path to a directory containing the classes models')
     parser.add_argument('--model_symmetry', type=str, default='/annotations/symmetries.json',
                         help='path to .json-file containing the class symmetries')
+    parser.add_argument("--quick_eval", action='store_true',
+                        help="Enable quick evaluation mode (process only 10% of batches for faster evaluation)")
     # Tensorboard
     parser.add_argument('--tensorboard', action='store_true',
                         help='Enable TensorBoard logging')
@@ -436,8 +438,13 @@ def main(args):
         else:
             eval_epoch = None
         
-        pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
-                      args.rotation_representation, device, args.output_dir, eval_epoch)
+        pose_evaluate(model=model, 
+                      matcher=matcher, 
+                      pose_evaluator=pose_evaluator,
+                      data_loader=data_loader_val, 
+                      image_set=args.eval_set, bbox_mode=args.bbox_mode,
+                      quick_mode=args.quick_eval, 
+                      device=device, output_dir=args.output_dir, epoch=eval_epoch)
         return
     # Evaluate the model for the BOP challenge
     if args.eval_bop:
@@ -526,8 +533,8 @@ def main(args):
             eval_epoch = checkpoint['epoch']
         else:
             eval_epoch = None
-        #pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
-         #             args.rotation_representation, device, args.output_dir, eval_epoch)
+        pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
+                     args.rotation_representation, device, args.output_dir, eval_epoch)
         
         if writer:
             # Validation metrics
