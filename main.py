@@ -292,7 +292,7 @@ def main(args):
 
     model, criterion, postprocessors, matcher = build_model(args)
     model.to(device)
-
+    # TODO: Check which one is better in terms of runtime speed
     #pose_evaluator = build_pose_evaluator(args)
     pose_evaluator = build_better_pose_evaluator(args)
     if args.use_ema:
@@ -311,7 +311,7 @@ def main(args):
     print('number of params:', n_parameters)
     param_dicts = get_param_dict(args, model_without_ddp)
 
-    # Check if they 
+    # TODO: Check if the other one is needed
     # optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, 
     #                               weight_decay=args.weight_decay)
     
@@ -428,11 +428,11 @@ def main(args):
             args.start_epoch = checkpoint['epoch'] + 1
 
     if args.eval:
-        # print("COCO Eval.")
-        # test_stats, coco_evaluator = evaluate(
-        #     model, criterion, postprocessors, data_loader_val_coco, base_ds, device, args)
-        # if args.output_dir:
-        #     utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+        print("COCO Eval.")
+        test_stats, coco_evaluator = evaluate(
+            model, criterion, postprocessors, data_loader_val_coco, base_ds, device, args)
+        if args.output_dir:
+            utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         if args.resume:
             eval_epoch = checkpoint['epoch']
         else:
@@ -473,6 +473,7 @@ def main(args):
     print("Start training")
     start_time = time.time()
     best_map_holder = BestMetricHolder(use_ema=args.use_ema)
+    best_adds_score = 0.0
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start_time = time.time()
         if args.distributed:
@@ -533,8 +534,24 @@ def main(args):
             eval_epoch = checkpoint['epoch']
         else:
             eval_epoch = None
-        pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
-                     args.rotation_representation, device, args.output_dir, eval_epoch)
+        #TODO: Start make adaptive eval. Start after warm-up epochs. Then every 10 Epochs. After 80% of training every 5 epochs. 95%100% Everpy epoch
+        # Last epoch finally the full evaluation on the val set.
+        if epoch % 5 == 0:
+            current_adds_score = pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
+                        args.rotation_representation, device, args.output_dir, eval_epoch)
+            print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
+        
+        # Save Best Model (Maximize Score)
+        if current_adds_score > best_adds_score:
+            best_adds_score = current_adds_score
+            
+            print(f"🚀 New Best Model found! Saving checkpoint...")
+            torch.save({
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch,
+                'score': best_adds_score
+            }, "checkpoint_best_adds.pth")
         
         if writer:
             # Validation metrics

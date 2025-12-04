@@ -315,7 +315,7 @@ def pose_evaluate(model,
     print("Start Calculating ADD-S")
     pose_evaluator.evaluate_pose_adi(output_eval_dir)
     print("Start Calculating ADD(-S)")
-    pose_evaluator.evaluate_pose_adds(output_eval_dir)
+    results_adds = pose_evaluator.evaluate_pose_adds(output_eval_dir)
     print("Start Calculating Average Translation Error")
     pose_evaluator.calculate_class_avg_translation_error(output_eval_dir)
     print("Start Calculating Average Rotation Error")
@@ -323,7 +323,7 @@ def pose_evaluate(model,
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Evaluation time: {}".format(total_time_str))
-    return
+    return results_adds
 @torch.no_grad()
 def bop_evaluate(model, matcher, data_loader, image_set, bbox_mode, rotation_mode, device, output_dir):
     """
