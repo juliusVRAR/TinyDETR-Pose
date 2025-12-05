@@ -46,7 +46,7 @@ rootless-docker run --gpus all --shm-size=256g \
     bash -c "python /workspace/LWDETR/models/ops/setup.py build install && \
                 python -u -m torch.distributed.launch \
                     --nproc_per_node=$NUM_GPU \
-                    --use_env \     
+                    --use_env \
                     /workspace/LWDETR/main.py \
                                 --lr 1e-4 \
                                 --lr_transformer 2e-5 \

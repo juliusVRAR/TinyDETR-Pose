@@ -29,7 +29,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
     
 # Set up the working directory
-WORKDIR /workspace
+RUN mkdir -p /workspace/LWDETR
+WORKDIR /workspace/LWDETR
 
 # Create virtual environment
 RUN python3.10 -m venv /venvs/lwdetr6d
@@ -44,7 +45,7 @@ RUN pip install imageio==2.37.0
 RUN pip install trimesh
 RUN pip install tensorboard
 RUN pip install torch-tb-profiler==0.4.3
-
+COPY . /workspace/LWDETR
 # Do this in side the container after starting it the first time:
 # Compiling CUDA operators
 # cd /workspace/LWDETR/models/ops
