@@ -1796,10 +1796,11 @@ def build(args):
     weight_dict = {'loss_ce': args.cls_loss_coef, 
                    'loss_bbox': args.bbox_loss_coef, 
                    'loss_giou': args.giou_loss_coef,
-                   'loss_trans_xy': args.trans_xy_loss_coef,
-                   'loss_trans_z': args.trans_z_loss_coef,
-                   'loss_keypoint': args.keypoint_loss_coef,
-                   'loss_rot': args.rot_loss_coef}
+                #    'loss_trans_xy': args.trans_xy_loss_coef,
+                #    'loss_trans_z': args.trans_z_loss_coef,
+                #    'loss_keypoint': args.keypoint_loss_coef,
+                #    'loss_rot': args.rot_loss_coef
+                   }
     
     # TODO this is a hack
     if args.aux_loss:

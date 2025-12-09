@@ -219,22 +219,25 @@ class PoseEvaluator(object):
             k: float(v / num_valid_class) for k, v in sum_acc.items()
         }
 
+        overall_auc = float(results["accuracy"]["mean"]) if num_valid_class > 0 else 0.0
+
         log_file.close()
         json.dump(results, json_file, indent=2)
         
         json_file.close()
+        return overall_auc
 
     def evaluate_pose_adds(self, output_path):
         """Evaluate 6D pose by ADD(-S) metric"""
-        self._evaluate_pose_generic(output_path, 'Metric ADD(-S)', None)
+        return self._evaluate_pose_generic(output_path, 'Metric ADD(-S)', None)
 
     def evaluate_pose_adi(self, output_path):
         """Evaluate 6D pose by ADD-S metric"""
-        self._evaluate_pose_generic(output_path, 'Metric ADD-S', None)
+        return self._evaluate_pose_generic(output_path, 'Metric ADD-S', None)
 
     def evaluate_pose_add(self, output_path):
         """Evaluate 6D pose by ADD Metric"""
-        self._evaluate_pose_generic(output_path, 'Metric ADD', None)
+        return self._evaluate_pose_generic(output_path, 'Metric ADD', None)
 
     def calculate_class_avg_translation_error(self, output_path):
         """Calculate average translation error in meters"""

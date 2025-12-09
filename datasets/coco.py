@@ -40,7 +40,7 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         """
         import os
         if "image_folder" in img_dict:                # -------- YCB-V --------
-            subdir = f"{self.split}"
+            subdir = f"{self.split}_{img_dict['type']}" if self.split == "train" else f"{self.split}"
             return os.path.join(
                 self.img_folder,
                 subdir,
@@ -159,40 +159,39 @@ def make_coco_transforms_square_div_64(image_set):
 
     scales = [448, 512, 576, 640, 704, 768, 832, 896]
 
-    if image_set == 'train':
-        return T.Compose([
-            T.RandomHorizontalFlip(),
-            T.RandomSelect(
+    return T.Compose([
+        T.RandomHorizontalFlip(),
+        T.RandomSelect(
+            T.SquareResize(scales),
+            T.Compose([
+                T.RandomResize([400, 500, 600]),
+                T.RandomSizeCrop(384, 600),
                 T.SquareResize(scales),
-                T.Compose([
-                    T.RandomResize([400, 500, 600]),
-                    T.RandomSizeCrop(384, 600),
-                    T.SquareResize(scales),
-                ]),
-            ),
-            normalize,
-        ])
+            ]),
+        ),
+        normalize,
+    ])
 
-    if image_set == 'val':
-        return T.Compose([
-            T.SquareResize([640]),
-            normalize,
-        ])
-    if image_set == 'val_speed':
-        return T.Compose([
-            T.SquareResize([640]),
-            normalize,
-        ])
+    # if image_set == 'val':
+    #     return T.Compose([
+    #         T.SquareResize([640]),
+    #         normalize,
+    #     ])
+    # if image_set == 'val_speed':
+    #     return T.Compose([
+    #         T.SquareResize([640]),
+    #         normalize,
+    #     ])
 
     raise ValueError(f'unknown {image_set}')
 
 
 def build(image_set, args):
-    root = Path(args.coco_path)
+    root = Path(args.dataset_path)
     assert root.exists(), f'provided COCO path {root} does not exist'
     mode = 'instances'
     PATHS = {
-        "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
+        "train": (root , root / "annotations" / f'{mode}_train.json'),
         "val": (root /  "val2017", root / "annotations" / f'{mode}_val2017.json'),
         "test": (root / "test2017", root / "annotations" / f'image_info_test-dev2017.json'),
     }
@@ -211,7 +210,7 @@ def build(image_set, args):
 
     
     if square_resize_div_64:
-        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(image_set))
+        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(image_set), split="train")
     else:
         dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set))
     return dataset
@@ -219,7 +218,7 @@ def build(image_set, args):
 def build_coco_eval(image_set, args):
     # root = Path("/workspace/LW-DETR/data/")
     # TODO: Get this from args
-    root = Path("/workspace/LWDETR/", args.dataset_path)
+    root = Path("/workspaces/lw-detr6d/", args.dataset_path)
     assert root.exists(), f'provided COCO path {root} does not exist'
     mode = 'instances'
     PATHS = {

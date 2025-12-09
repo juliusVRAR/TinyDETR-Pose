@@ -29,3 +29,6 @@ def get_coco_api_from_dataset(dataset):
 
 def build_dataset(image_set, args):
     return build_coco_eval(image_set, args)
+
+def build_train_dataset(image_set, args):
+    return build_coco(image_set, args)

@@ -200,7 +200,8 @@ class PoseEvaluatorLMO(object):
         log_file.close()
         json.dump(adds_results, json_file)
         json_file.close()
-        return
+        overall_acc = float(adds_results["accuracy"]['0.10']) if num_valid_class > 0 else 0.0
+        return overall_acc
 
     def evaluate_pose_adi(self, output_path):
         """
@@ -329,7 +330,8 @@ class PoseEvaluatorLMO(object):
         log_file.close()
         json.dump(adi_results, json_file)
         json_file.close()
-        return
+        overall_acc = float(adi_results["accuracy"]['0.10']) if num_valid_class > 0 else 0.0
+        return overall_acc
 
     def evaluate_pose_add(self, output_path):
         """
@@ -460,7 +462,8 @@ class PoseEvaluatorLMO(object):
         log_file.close()
         json.dump(add_results, json_file)
         json_file.close()
-        return
+        overall_acc = float(add_results["accuracy"]['0.10']) if num_valid_class > 0 else 0.0
+        return overall_acc
 
     def calculate_class_avg_translation_error(self, output_path):
         """
@@ -755,5 +758,4 @@ class PoseEvaluatorLMO(object):
         rd_rad = LA.norm(temp, 'fro') / np.sqrt(2)
         rd_deg = rd_rad / np.pi * 180
         return rd_deg
-
 

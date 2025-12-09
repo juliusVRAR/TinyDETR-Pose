@@ -22,7 +22,7 @@ import time
 from collections import defaultdict, deque
 import datetime
 import pickle
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import torch
 import torch.distributed as dist
@@ -342,7 +342,11 @@ class NestedTensor(object):
         return str(self.tensors)
 
 
-def nested_tensor_from_tensor_list(tensor_list: List[Tensor], meta_list=None):
+def nested_tensor_from_tensor_list(
+    tensor_list: List[torch.Tensor],
+    meta_list=None,
+    orig_size: Optional[Tuple[int, int]] = (480, 640),  # (orig_h, orig_w)
+):
     # TODO make this more general
     if tensor_list[0].ndim == 3:
         if torchvision._is_tracing():
@@ -352,18 +356,29 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor], meta_list=None):
 
         # TODO make it support different-sized images
         max_size = _max_by_axis([list(img.shape) for img in tensor_list])
-        # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
         batch_shape = [len(tensor_list)] + max_size
         b, c, h, w = batch_shape
         dtype = tensor_list[0].dtype
         device = tensor_list[0].device
         tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
         mask = torch.ones((b, h, w), dtype=torch.bool, device=device)
+        if orig_size is not None:
+            orig_h, orig_w = orig_size
+        else:
+            orig_h = orig_w = None
         for img, pad_img, m in zip(tensor_list, tensor, mask):
+            # copy image into batch tensor
             pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
-            m[: img.shape[1], :img.shape[2]] = False
+
+            if orig_h is not None and orig_w is not None \
+               and img.shape[1] >= orig_h and img.shape[2] >= orig_w:
+                m[:orig_h, :orig_w] = False
+            else:
+                # Fallback: treat the whole img area as valid
+                m[: img.shape[1], : img.shape[2]] = False
     else:
-        raise ValueError('not supported')
+        raise ValueError('not supported') #
+
     return NestedTensor(tensor, mask, meta=meta_list or {})
 
 

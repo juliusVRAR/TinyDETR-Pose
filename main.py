@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-from datasets import get_coco_api_from_dataset, build_dataset as build_dataset_coco
+from datasets import build_train_dataset, get_coco_api_from_dataset, build_dataset as build_dataset_coco
 from data_utils import build_dataset
 from engine import evaluate, train_one_epoch, pose_evaluate, bop_evaluate
 from models import build_model
@@ -304,7 +304,7 @@ def main(args):
     if args.distributed:
         if args.sync_bn:
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
     
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -348,7 +348,8 @@ def main(args):
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
     
     # Build the dataset for training and validation
-    dataset_train = build_dataset(image_set=args.train_set, args=args)
+    # dataset_train = build_dataset(image_set=args.train_set, args=args)
+    dataset_train = build_train_dataset(image_set=args.train_set, args=args)
     dataset_val = build_dataset(image_set=args.eval_set, args=args)
     dataset_val_coco = build_dataset_coco(image_set='val', args=args)
 
@@ -536,14 +537,22 @@ def main(args):
             eval_epoch = None
         #TODO: Start make adaptive eval. Start after warm-up epochs. Then every 10 Epochs. After 80% of training every 5 epochs. 95%100% Everpy epoch
         # Last epoch finally the full evaluation on the val set.
-        if epoch % 5 == 0:
-            current_adds_score = pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
-                        args.rotation_representation, device, args.output_dir, eval_epoch)
-            print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
+        # if epoch % 5 == 0:
+        #     current_adds_score = pose_evaluate(model=model,
+        #               matcher=matcher,
+        #               pose_evaluator=pose_evaluator,
+        #               data_loader=data_loader_val,
+        #               image_set=args.eval_set,
+        #               bbox_mode=args.bbox_mode,
+        #               quick_mode=args.quick_eval,
+        #               device=device,
+        #               output_dir=args.output_dir,
+        #               epoch=eval_epoch)
+        #     print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
         
-        # Save Best Model (Maximize Score)
-        if current_adds_score > best_adds_score:
-            best_adds_score = current_adds_score
+        # # Save Best Model (Maximize Score)
+        # if current_adds_score > best_adds_score:
+        #     best_adds_score = current_adds_score
             
             print(f"🚀 New Best Model found! Saving checkpoint...")
             torch.save({

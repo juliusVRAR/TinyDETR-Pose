@@ -215,7 +215,8 @@ class PoseEvaluator(object):
         log_file.close()
         json.dump(adds_results, json_file)
         json_file.close()
-        return
+        overall_auc = float(adds_results["accuracy"]['auc']) if num_valid_class > 0 else 0.0
+        return overall_auc
 
     def evaluate_pose_adi(self, output_path):
         """
@@ -361,7 +362,8 @@ class PoseEvaluator(object):
         log_file.close()
         json.dump(adi_results, json_file)
         json_file.close()
-        return
+        overall_auc = float(adi_results["accuracy"]['auc']) if num_valid_class > 0 else 0.0
+        return overall_auc
 
     def evaluate_pose_add(self, output_path):
         """
@@ -509,7 +511,8 @@ class PoseEvaluator(object):
         log_file.close()
         json.dump(add_results, json_file)
         json_file.close()
-        return
+        overall_auc = float(add_results["accuracy"]['auc']) if num_valid_class > 0 else 0.0
+        return overall_auc
 
     def calculate_class_avg_translation_error(self, output_path):
         """
