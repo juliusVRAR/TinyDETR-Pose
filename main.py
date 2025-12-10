@@ -348,10 +348,10 @@ def main(args):
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
     
     # Build the dataset for training and validation
-    # dataset_train = build_dataset(image_set=args.train_set, args=args)
-    dataset_train = build_train_dataset(image_set=args.train_set, args=args)
+    dataset_train = build_dataset(image_set=args.train_set, args=args)
+    # dataset_train = build_train_dataset(image_set=args.train_set, args=args)
     dataset_val = build_dataset(image_set=args.eval_set, args=args)
-    dataset_val_coco = build_dataset_coco(image_set='val', args=args)
+    # dataset_val_coco = build_dataset_coco(image_set='val', args=args)
 
     if args.distributed:
         sampler_train = DistributedSampler(dataset_train)
@@ -369,12 +369,12 @@ def main(args):
                                  drop_last=False, collate_fn=utils.collate_fn, 
                                  num_workers=args.num_workers)
     
-    data_loader_val_coco = DataLoader(dataset_val_coco, args.batch_size, sampler=sampler_val,
-                                drop_last=False, collate_fn=utils.collate_fn, 
-                                num_workers=args.num_workers)
+    # data_loader_val_coco = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
+    #                             drop_last=False, collate_fn=utils.collate_fn, 
+    #                             num_workers=args.num_workers)
 
 
-    base_ds = get_coco_api_from_dataset(dataset_val_coco)
+    base_ds = get_coco_api_from_dataset(dataset_val)
 
    
     # if args.pretrain_weights is not None:
@@ -529,7 +529,7 @@ def main(args):
                 utils.save_on_master(weights, checkpoint_path)
 
         test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val_coco, base_ds, device, args=args
+            model, criterion, postprocessors, data_loader_val, base_ds, device, args=args
         )
         if args.resume:
             eval_epoch = checkpoint['epoch']

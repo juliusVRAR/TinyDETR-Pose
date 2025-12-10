@@ -10,6 +10,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 # ------------------------------------------------------------------------
 
+from data_utils.pose_dataset import PoseDataset
 import torch.utils.data
 import torchvision
 import data_utils.torchvision_datasets 
@@ -24,6 +25,8 @@ def get_coco_api_from_dataset(dataset):
     if isinstance(dataset, torchvision.datasets.CocoDetection):
         return dataset.coco
     elif isinstance(dataset,data_utils.torchvision_datasets.CocoDetection):
+        return dataset.coco
+    elif isinstance(dataset, PoseDataset):
         return dataset.coco
 
 

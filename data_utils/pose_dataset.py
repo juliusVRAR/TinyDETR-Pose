@@ -46,6 +46,8 @@ import json
 from data_utils.data_augment import random_affine, random_affine_single
 from util.utils import save_annotated_image, camera_params_to_K, pad_to_size
 from util.visualize_object_pose import visualize_object_keypoints, YCBVVisualizer, save_image_with_bboxes
+from pycocotools.coco import COCO
+
 DEBUG = False
 DEBUG_OUT=Path("debug")
 
@@ -145,6 +147,7 @@ class PoseDataset(CocoDetection):
         self.use_mosaic = use_mosaic
         self.cad_model_path = cad_models_path
         self.models_info = load_json(Path(cad_models_path, "models_info.json"))
+        self.coco = COCO(ann_file)
         
         # Precompute diameter lookup (id -> float)
         self._diameters = {}
