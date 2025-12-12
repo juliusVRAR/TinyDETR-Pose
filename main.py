@@ -271,6 +271,35 @@ def get_args_parser():
     parser_export.add_argument('--dry-run', '--test', '-t', action='store_true', help="just print command")
     return parser
 
+def should_run_pose_eval(epoch: int, total_epochs: int, warmup_epochs: int) -> bool:
+    """
+    Adaptive pose-eval schedule (epoch is 0-based):
+      - < warmup_epochs         : no pose eval
+      - warmup..80% of training : every 10 epochs
+      - 80%..95% of training    : every 5 epochs
+      - >=95% of training       : every epoch
+      - always run on last epoch
+    """
+    e = epoch + 1  # convert to 1-based for readability
+
+    if e < warmup_epochs:
+        return False
+
+    # Always evaluate on final epoch
+    if e == total_epochs:
+        return True
+
+    frac = e / float(total_epochs)
+
+    if frac >= 0.95:
+        # 95–100%: every epoch
+        return True
+    elif frac >= 0.80:
+        # 80–95%: every 5 epochs
+        return (e % 5) == 0
+    else:
+        # After warmup, before 80%: every 10 epochs
+        return (e - warmup_epochs) % 10 == 0
 
 def main(args):
     utils.init_distributed_mode(args)
@@ -535,33 +564,46 @@ def main(args):
             eval_epoch = checkpoint['epoch']
         else:
             eval_epoch = None
-        #TODO: Start make adaptive eval. Start after warm-up epochs. Then every 10 Epochs. After 80% of training every 5 epochs. 95%100% Everpy epoch
-        # Last epoch finally the full evaluation on the val set.
-        # if epoch % 5 == 0:
-        #     current_adds_score = pose_evaluate(model=model,
-        #               matcher=matcher,
-        #               pose_evaluator=pose_evaluator,
-        #               data_loader=data_loader_val,
-        #               image_set=args.eval_set,
-        #               bbox_mode=args.bbox_mode,
-        #               quick_mode=args.quick_eval,
-        #               device=device,
-        #               output_dir=args.output_dir,
-        #               epoch=eval_epoch)
-        #     print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
         
-        # # Save Best Model (Maximize Score)
-        # if current_adds_score > best_adds_score:
-        #     best_adds_score = current_adds_score
-            
-            print(f"🚀 New Best Model found! Saving checkpoint...")
-            torch.save({
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'epoch': epoch,
-                'score': best_adds_score
-            }, "checkpoint_best_adds.pth")
-        
+        # Adaptive pose evaluation schedule
+        run_pose_eval = (
+            not args.skip_pose_eval
+            and should_run_pose_eval(epoch, args.epochs, args.warm_up_epochs)
+        )
+
+        if run_pose_eval:
+            # Last epoch: force full evaluation (ignore quick_eval flag)
+            is_last_epoch = (epoch + 1) == args.epochs
+            quick_mode = is_last_epoch
+
+            current_adds_score = pose_evaluate(
+                model=model,
+                matcher=matcher,
+                pose_evaluator=pose_evaluator,
+                data_loader=data_loader_val,
+                image_set=args.eval_set,
+                bbox_mode=args.bbox_mode,
+                quick_mode=quick_mode,
+                device=device,
+                output_dir=args.output_dir,
+                epoch=eval_epoch,
+                quick_mode=quick_mode
+            )
+            print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
+
+            # Save Best Model (maximize ADD-S)
+            if current_adds_score > best_adds_score:
+                best_adds_score = current_adds_score
+                print("🚀 New Best Model found! Saving checkpoint...")
+                torch.save(
+                    {
+                        'model': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'epoch': epoch,
+                        'score': best_adds_score,
+                    },
+                    "checkpoint_best_adds.pth",
+                )
         if writer:
             # Validation metrics
             for k, v in test_stats.items():
