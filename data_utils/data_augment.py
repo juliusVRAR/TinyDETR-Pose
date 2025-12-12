@@ -301,6 +301,49 @@ def random_affine_single(
                                          (target_size[1],target_size[0]), 
                                          M)
         
+        # ----Very rare edge case, drop degenerate boxes produced by affine/mosaic ----
+        w = affine_boxes[:, 2] - affine_boxes[:, 0]
+        h = affine_boxes[:, 3] - affine_boxes[:, 1]
+        keep_np = (w > 1.0) & (h > 1.0)  # 1-pixel threshold; adjust if needed
+
+        if not keep_np.any():
+            # No valid objects left: clear per-object fields and skip pose update
+            device = target['boxes'].device
+            target['boxes'] = target['boxes'].new_zeros((0, 4))
+            target['labels'] = target['labels'].new_zeros((0,), dtype=target['labels'].dtype)
+            for key in [
+                'relative_position', 'relative_rotation', 'relative_quaternions',
+                'object_center_2d', 'intrinsics',
+                'model_points', 'is_symmetric', 'diameter',
+            ]:
+                if key in target:
+                    t = target[key]
+                    target[key] = t.new_zeros((0,) + t.shape[1:]) if isinstance(t, torch.Tensor) else []
+        else:
+            # Filter boxes and all aligned target fields
+            affine_boxes = affine_boxes[keep_np]
+            keep = torch.from_numpy(keep_np).to(target['boxes'].device, dtype=torch.bool)
+
+            for key in [
+                'boxes', 'labels',
+                'relative_position', 'relative_rotation', 'relative_quaternions',
+                'object_center_2d', 'intrinsics',
+                'model_points', 'is_symmetric', 'diameter',
+            ]:
+                if key in target:
+                    t = target[key]
+                    if isinstance(t, torch.Tensor) and t.shape[0] == keep.shape[0]:
+                        target[key] = t[keep]
+
+        if keep_np.any():
+            # Convert kept boxes back to normalized cxcywh
+            affine_boxes_t = torch.from_numpy(affine_boxes).to(dtype=torch.float32)
+            affine_boxes_t = box_xyxy_to_cxcywh(affine_boxes_t)
+            affine_boxes_t = affine_boxes_t / torch.tensor(
+                [img.shape[1], img.shape[0], img.shape[1], img.shape[0]],
+                dtype=torch.float32,
+            )
+        # ---- END new block ----
         if DEBUG: 
             debug_img = img[:,:,::-1].copy()  # BGR to RGB
             debug_img = torch.from_numpy(debug_img)
@@ -367,95 +410,6 @@ def random_affine_single(
         write_png(img_tensor, Path(DEBUG_OUT, "after_random_affine", "img_tensor.png"))
     img_tensor = img_tensor.float() / 255.0
     return img_tensor, target
-
-def random_affine(
-    img,
-    rel_pos,
-    rel_rot,
-    rel_quats,
-    labels,
-    targets=(), # These are only the bboxes, TODO: rename
-    target_size=((512, 640)), # hw
-    degrees=10,
-    translate=0.1,
-    scales=0.1,
-    shear=10,
-    camera_matrix=None,
-    mosaic_obj_ids=None,
-    mosaic_intrinsics=None, 
-    mosaic_rots=None,
-    mosaic_trans=None
-    ):
-    
-    # make sure the image will be divisible by 64 after affine transformation for the ViT backbone
-    make_divisible_by_64(target_size)
-    if mosaic_intrinsics is not None:
-        camera_matrix['cx'] = mosaic_intrinsics[0][2].item()
-        camera_matrix['cy'] = mosaic_intrinsics[0][3].item()
-    M, scale, angle = get_affine_matrix(target_size, 
-                                        degrees, 
-                                        translate, 
-                                        scales, 
-                                        shear, 
-                                        camera_matrix)
-    # Apply affine transformation
-    img = cv2.warpAffine(img, M, 
-                         dsize=(target_size[1],target_size[0]), 
-                         borderValue=(114, 114, 114))
-    if DEBUG:
-        out = Path(DEBUG_OUT, "after_affine_trafo.jpg")
-        Image.fromarray(img).save(out)
-    # Transform label coordinates
-    if len(targets) > 0:
-        affine_boxes = apply_affine_to_bboxes(targets, 
-                                         (target_size[1],target_size[0]), 
-                                         M, scale)
-        if DEBUG: # Visualize after bbox affine trafos
-            mosaic_img_debug_out=torch.from_numpy(img).to(torch.uint8)
-            mosaic_img_debug_out= mosaic_img_debug_out.permute(2,0,1) # to CHW
-            mosaic_img_debug_out = mosaic_img_debug_out.float() / 255.0
-            # Mosaic image with 2d annotations after affine
-            save_annotated_image(image=img, 
-                                    targets={'boxes':torch.tensor(affine_boxes)}, 
-                                    output_path="after_affine_mosaic_bboxes.png", 
-                                    is_bbbox_coords_normalized=False,  
-                                    is_corrected_bbx_coords=True)
-                      
-        if mosaic_intrinsics is not None:
-            affine_trans, affine_rot = apply_affine_to_object_pose(targets=targets,
-                                                                   rotation=mosaic_rots,
-                                                                   translation=mosaic_trans,
-                                                                   target_size=(target_size[1],target_size[0]),
-                                                                   M=M, 
-                                                                   scale=scale, 
-                                                                   angle=angle)
-        if DEBUG:
-           
-            # This can vizualize the keypoints 
-            debug_img, projections = visualize_object_keypoints(cam=camera_matrix, 
-                                                                targets={'labels':torch.from_numpy(labels), 
-                                                                        "relative_position":torch.from_numpy(affine_trans), # (N,3)
-                                                                        "relative_rotation":torch.from_numpy(affine_rot), # (N,3,3)
-                                                                        "intrinsics": mosaic_intrinsics # (N,4)
-                                                                        }, 
-                                                                image=img[..., ::-1].copy(), # BGR to RGB
-                                                                obj_infos_by_label=labels)
-            cv2.imwrite(Path(DEBUG_OUT, "after_affine_mosaic_keypoints.png"), debug_img) # Vis of bboxes with objects center keypoints
-            #Visualize 3d cad
-            viz = YCBVVisualizer(CAD_MODELS)
-            K = camera_params_to_K(camera_matrix)
-            vis_img = viz.visualize_single_image(img[..., ::-1].copy(), 
-                                                 annotations={'labels':labels, 
-                                                              "relative_position":affine_trans, 
-                                                              "relative_rotation":affine_rot,
-                                                              "intrinsics": mosaic_intrinsics # (N,4)
-                                                              }, 
-                                                              K=K, 
-                                                              show_mesh=False, 
-                                                              sample_points=10000)
-            cv2.imwrite(Path(DEBUG_OUT, "after_affine_mosaic_vis3d.png"), vis_img) # Visualization of 3D bboxes and overalayed objects
-            
-    return img, targets
 
 def _mirror(image, boxes, prob=0.5, human_pose=False, object_pose=False, human_kpts=None, flip_index=None):
     _, width, _ = image.shape

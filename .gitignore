@@ -21,3 +21,4 @@ figs/
 plot*.py
 *.onnx
 *.engine
+output/*

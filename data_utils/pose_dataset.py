@@ -43,7 +43,7 @@ from PIL import Image
 from pathlib import Path
 import json
 #mosaicdetection
-from data_utils.data_augment import random_affine, random_affine_single
+from data_utils.data_augment import random_affine_single
 from util.utils import save_annotated_image, camera_params_to_K, pad_to_size
 from util.visualize_object_pose import visualize_object_keypoints, YCBVVisualizer, save_image_with_bboxes
 from pycocotools.coco import COCO
@@ -225,8 +225,8 @@ class PoseDataset(CocoDetection):
         if isinstance(img, torch.Tensor):
             img = to_pil_image(img)
         # We have to pad since the input for the ViT has to be dividable by 64.
-        if self.image_set == "test" or self.use_mosaic is False:
-            img = pad_to_size(img=img, fill=0)
+        # if self.image_set == "test" or self.use_mosaic is False:
+        #     img = pad_to_size(img=img, fill=0)
         image_id = self.ids[idx]
         target = {'image_id': image_id, 'annotations': target}
         img, target = self.prepare(img, target)

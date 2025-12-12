@@ -587,7 +587,7 @@ def main(args):
                 device=device,
                 output_dir=args.output_dir,
                 epoch=eval_epoch,
-                quick_mode=quick_mode
+                
             )
             print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
 

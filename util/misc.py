@@ -366,6 +366,18 @@ class NestedTensor(object):
 #         raise ValueError('not supported')
 #     return NestedTensor(tensor, mask)
 
+def round_to_square(h: int, w: int, target: int = 640) -> Tuple[int, int]:
+    """
+    Return a square (H, W) to pad to.
+    By default, always pad up to target x target (e.g. 640x640).
+    """
+    side = max(h, w)
+    # Clamp to target so we don't go above 640 unless you change target
+    side = max(side, target)
+    return side, side
+
+def round_up(value: int, multiple: int) -> int:
+    return (value + multiple - 1) // multiple * multiple
 def nested_tensor_from_tensor_list(
     tensor_list: List[torch.Tensor],
     meta_list=None,
@@ -373,13 +385,22 @@ def nested_tensor_from_tensor_list(
 ):
     # TODO make this more general
     if tensor_list[0].ndim == 3:
-        if torchvision._is_tracing():
-            # nested_tensor_from_tensor_list() does not export well to ONNX
-            # call _onnx_nested_tensor_from_tensor_list() instead
-            return _onnx_nested_tensor_from_tensor_list(tensor_list)
+        if False:
+            if torchvision._is_tracing():
+                # nested_tensor_from_tensor_list() does not export well to ONNX
+                # call _onnx_nested_tensor_from_tensor_list() instead
+                return _onnx_nested_tensor_from_tensor_list(tensor_list)
 
         # TODO make it support different-sized images
-        max_size = _max_by_axis([list(img.shape) for img in tensor_list])
+        max_size = _max_by_axis([list(img.shape) for img in tensor_list])# Force H/W to be multiples of 64
+        
+        # pad_multiple = 64
+        # max_size[1] = round_up(max_size[1], pad_multiple)  # height
+        # max_size[2] = round_up(max_size[2], pad_multiple)
+        
+        padded_h, padded_w = round_to_square(max_size[1], max_size[2], target=640)
+        max_size[1] = padded_h
+        max_size[2] = padded_w
         batch_shape = [len(tensor_list)] + max_size
         b, c, h, w = batch_shape
         dtype = tensor_list[0].dtype

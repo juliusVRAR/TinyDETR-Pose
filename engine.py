@@ -27,7 +27,7 @@ import os
 import numpy as np
 import time
 from evaluation_tools.metrics import get_src_permutation_idx, calc_rotation_error, calc_translation_error
-DEBUG = False
+DEBUG = True
 DEBUG_OUT=Path("debug")
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -69,6 +69,14 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             #filename = Path(DEBUG_OUT,f"batch_iter_{it}.png")
             filename = Path(DEBUG_OUT,f"batch.png")
             normalize = True
+            if samples.mask is not None:
+                # Invert so valid area is white, padding black (optional)
+                mask = (~samples.mask).float().unsqueeze(1)  # [B, 1, H, W]
+                mask_grid = torchvision.utils.make_grid(
+                    mask, nrow=nrow, padding=2, normalize=False
+                )
+            mask_filename = Path(DEBUG_OUT, "batch_mask.png")
+            torchvision.utils.save_image(mask_grid, mask_filename, nrow=nrow, padding=2)
             grid = torchvision.utils.make_grid(samples.tensors, nrow=nrow, padding=2, normalize=normalize)
             torchvision.utils.save_image(grid, filename, nrow=nrow, padding=2, normalize=normalize)
             # print(f"Grid saved as {filename}")
@@ -219,8 +227,8 @@ def pose_evaluate(model,
                   bbox_mode,  
                   device, 
                   output_dir, 
-                  epoch=None,
-                  quick_mode=False):
+                  quick_mode,
+                  epoch=None):
     """
     Evaluate PoET on the whole dataset, calculate the evaluation metrics and store the final performance.
     """
