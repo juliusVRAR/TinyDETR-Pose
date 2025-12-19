@@ -27,7 +27,7 @@ import os
 import numpy as np
 import time
 from evaluation_tools.metrics import get_src_permutation_idx, calc_rotation_error, calc_translation_error
-DEBUG = True
+DEBUG = False
 DEBUG_OUT=Path("debug")
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,

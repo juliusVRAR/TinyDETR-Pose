@@ -115,7 +115,7 @@ class PoseDataset(CocoDetection):
                  model_symmetry=None,
                  class_info=None,
                  sample_mesh_points = False, # Only true if we calulate symmetries because we have CAD model information
-                 n_mesh_points=100, # The higher the more VRAM we need but the better the symmetry-aware loss works (T6D samples 1500 points)
+                 n_mesh_points=128, # The higher the more VRAM we need but the better the symmetry-aware loss works (T6D samples 1500 points)
                  mesh_point_seed=0
                  ):
         """
@@ -148,6 +148,7 @@ class PoseDataset(CocoDetection):
         self.cad_model_path = cad_models_path
         self.models_info = load_json(Path(cad_models_path, "models_info.json"))
         self.coco = COCO(ann_file)
+        self.mesh_point_seed = mesh_point_seed
         
         # Precompute diameter lookup (id -> float)
         self._diameters = {}
@@ -1023,7 +1024,7 @@ def build(image_set, args):
                           cad_models_path=cad_model_path,
                           model_symmetry=model_symmetry,
                           class_info=class_info,
-                          mesh_point_seed=0)
+                          mesh_point_seed=args.seed)
     
     if args.mosaic_augmentation and 'train' in image_set:
         print("Creating Mosaic Augmentation")

@@ -848,7 +848,22 @@ class SetCriterion(nn.Module):
         # Only consider x,y components (L1 loss)
         loss_trans = self.mae_loss(src_trans[:, :2], tgt_trans[:, :2]).sum() / num_boxes
         return {'loss_trans_xy': loss_trans}
-    
+
+    def loss_relative_log_l1(self, pred_z_meters, gt_z_meters):
+        """
+        Computes L1 loss in Log Space. 
+        Returns the SUM of errors (not mean).
+        """
+        eps = 1e-6
+        pred_z = torch.clamp(pred_z_meters, min=eps)
+        gt_z = torch.clamp(gt_z_meters, min=eps)
+        
+        # Compute element-wise loss
+        loss = torch.abs(torch.log(pred_z) - torch.log(gt_z))
+        
+        # Return Sum. Let the caller divide by global num_boxes.
+        return loss.sum()
+
     # Laplacian Aleatoric Loss for translation in z
     def loss_trans_z(self, 
                     outputs, 
@@ -857,6 +872,10 @@ class SetCriterion(nn.Module):
                     num_boxes):
         
         idx = self._get_src_permutation_idx(indices)
+        
+        # -------------------------------------------------------------
+        # OPTION A: Laplacian Uncertainty
+        # -------------------------------------------------------------
         # 1. Get Predictions (Specific to Z and Uncertainty)
         # We use the Normalized Z (0-1) for stability
         src_norm_z = outputs['pred_trans_z'][idx] # Normalized between 0-1
@@ -872,6 +891,22 @@ class SetCriterion(nn.Module):
         l1_error = torch.abs(src_norm_z - tgt_trans_z)
         loss = (l1_error * torch.exp(-src_log_var)) + src_log_var
         loss = loss.sum() / num_boxes
+        
+        # # -------------------------------------------------------------
+        # # OPTION B: Log-L1 Loss (Ablation Experiment)
+        # # -------------------------------------------------------------
+        # # USE: Metric Z (Meters)
+        # # Why: Physically intuitive log-ratio.
+        # # -------------------------------------------------------------
+        # # Extract Z from the Metric Translation vector
+        # src_z_meters = outputs['pred_translations'][idx][:, 2] 
+        # tgt_trans = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        # tgt_z_meters = tgt_trans[:, 2] # Already in meters
+        # # Calculate SUM of errors
+        # loss_z_sum = self.loss_relative_log_l1(src_z_meters, tgt_z_meters)
+        # # Normalize by global object count (Safety check for divide-by-zero)
+        # # Note: num_boxes is usually synced across GPUs in DETR
+        # loss = loss_z_sum / num_boxes
         
         return {'loss_trans_z': loss}
     def adds_loss(self,

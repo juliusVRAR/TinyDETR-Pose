@@ -82,7 +82,7 @@
         "--dec_n_points","2",
         "--bbox_reparam",
         "--lite_refpoint_refine",
-        "--num_queries","100",
+        "--num_queries","50",
         "--ia_bce_loss",
         "--cls_loss_coef","1",
         "--num_select","100",
