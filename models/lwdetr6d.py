@@ -1820,7 +1820,8 @@ def build(args):
         bbox_reparam=args.bbox_reparam,
         rotation_mode="6d",
     )
-    # load_pretrained_weights(model, Path(args.pretrain_weights))
+    if args.pretrain_weights is not None:
+        load_pretrained_weights(model, Path(args.pretrain_weights))
     
     if  args.resume is None:
         model.init_pose_heads()
