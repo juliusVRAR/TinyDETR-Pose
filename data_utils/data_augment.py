@@ -301,62 +301,88 @@ def random_affine_single(
                                          (target_size[1],target_size[0]), 
                                          M)
         
-        # ----Very rare edge case, drop degenerate boxes produced by affine/mosaic ----
-        w = affine_boxes[:, 2] - affine_boxes[:, 0]
-        h = affine_boxes[:, 3] - affine_boxes[:, 1]
-        keep_np = (w > 1.0) & (h > 1.0)  # 1-pixel threshold; adjust if needed
+    # ----drop degenerate boxes produced by affine/mosaic ----
+    # 1. FORCE SYNCHRONIZATION
+    # Ensure affine_boxes and target['labels'] have the same length BEFORE we start.
+    # If they mismatch, the labels are usually the "source of truth" (you can't have a box without a label).
+    min_len = min(len(affine_boxes), len(target['labels']))
 
-        if not keep_np.any():
-            # No valid objects left: clear per-object fields and skip pose update
-            device = target['boxes'].device
-            target['boxes'] = target['boxes'].new_zeros((0, 4))
-            target['labels'] = target['labels'].new_zeros((0,), dtype=target['labels'].dtype)
-            for key in [
-                'relative_position', 'relative_rotation', 'relative_quaternions',
-                'object_center_2d', 'intrinsics',
-                'model_points', 'is_symmetric', 'diameter',
-            ]:
-                if key in target:
-                    t = target[key]
-                    target[key] = t.new_zeros((0,) + t.shape[1:]) if isinstance(t, torch.Tensor) else []
-        else:
-            # Filter boxes and all aligned target fields
-            affine_boxes = affine_boxes[keep_np]
-            keep = torch.from_numpy(keep_np).to(target['boxes'].device, dtype=torch.bool)
+    if len(affine_boxes) > min_len:
+        affine_boxes = affine_boxes[:min_len]
+        
+    # Sync all target fields to this minimum length immediately
+    # This prevents the "skip" bug where mismatched fields were ignored
+    for key in ['boxes', 'labels', 'relative_position', 'relative_rotation', 
+                'relative_quaternions', 'object_center_2d', 'intrinsics', 
+                'model_points', 'is_symmetric', 'diameter']:
+        if key in target:
+            t = target[key]
+            if isinstance(t, torch.Tensor) and t.shape[0] > min_len:
+                target[key] = t[:min_len]
+            elif isinstance(t, list) and len(t) > min_len:
+                target[key] = t[:min_len]
 
-            for key in [
-                'boxes', 'labels',
-                'relative_position', 'relative_rotation', 'relative_quaternions',
-                'object_center_2d', 'intrinsics',
-                'model_points', 'is_symmetric', 'diameter',
-            ]:
-                if key in target:
-                    t = target[key]
-                    if isinstance(t, torch.Tensor) and t.shape[0] == keep.shape[0]:
-                        target[key] = t[keep]
+    # 2. PREPARE TENSORS
+    device = target['boxes'].device
+    if not isinstance(affine_boxes, torch.Tensor):
+        affine_boxes = torch.from_numpy(affine_boxes).to(device, dtype=torch.float32)
 
-        if keep_np.any():
-            # Convert kept boxes back to normalized cxcywh
-            affine_boxes_t = torch.from_numpy(affine_boxes).to(dtype=torch.float32)
-            affine_boxes_t = box_xyxy_to_cxcywh(affine_boxes_t)
-            affine_boxes_t = affine_boxes_t / torch.tensor(
-                [img.shape[1], img.shape[0], img.shape[1], img.shape[0]],
-                dtype=torch.float32,
+    # 3. CALCULATE KEEP MASK
+    # Now keep has length == min_len, so it works for all fields
+    w = affine_boxes[:, 2] - affine_boxes[:, 0]
+    h = affine_boxes[:, 3] - affine_boxes[:, 1]
+    keep = (w > 1.0) & (h > 1.0)
+    keys_to_filter = [
+    'boxes', 'labels', 'relative_position', 'relative_rotation', 
+    'relative_quaternions', 'object_center_2d', 'intrinsics', 
+    'model_points', 'is_symmetric', 'diameter'
+    ]
+    # 4. FILTER UNIFORMLY
+    if keep.any():
+        # Filter metadata fields
+        for key in keys_to_filter:
+            if key in target:
+                t = target[key]
+                if isinstance(t, torch.Tensor):
+                    target[key] = t[keep]
+                elif isinstance(t, list):
+                    target[key] = [item for item, k in zip(t, keep) if k]
+
+        # Process Boxes (Normalize and Save)
+        kept_boxes = affine_boxes[keep]
+        final_boxes = box_xyxy_to_cxcywh(kept_boxes)
+        scale_tensor = torch.tensor(
+            [img.shape[1], img.shape[0], img.shape[1], img.shape[0]],
+            device=device, dtype=torch.float32
+        )
+        target['boxes'] = final_boxes / scale_tensor
+
+    else:
+        # Handle empty case (no valid boxes left)
+        target['boxes'] = torch.zeros((0, 4), device=device)
+        # Clear other fields
+        for key in keys_to_filter: 
+            if key in target:
+                t = target[key]
+                if isinstance(t, torch.Tensor):
+                    target[key] = t.new_zeros((0,) + t.shape[1:])
+                else:
+                    target[key] = []
+    # ---- END new block ----
+    if DEBUG: 
+        debug_img = img[:,:,::-1].copy()  # BGR to RGB
+        debug_img = torch.from_numpy(debug_img)
+        debug_img = debug_img.permute(2,0,1) # to CHW
+        # Mosaic image with 2d annotations after affine
+        save_image_with_bboxes(
+                img=debug_img,
+                boxes=affine_boxes,
+                labels=target['labels'],
+                out_path=Path(DEBUG_OUT,"after_random_affine",f"bboxes_ids_{i}.png")
             )
-        # ---- END new block ----
-        if DEBUG: 
-            debug_img = img[:,:,::-1].copy()  # BGR to RGB
-            debug_img = torch.from_numpy(debug_img)
-            debug_img = debug_img.permute(2,0,1) # to CHW
-            # Mosaic image with 2d annotations after affine
-            save_image_with_bboxes(
-                    img=debug_img,
-                    boxes=affine_boxes,
-                    labels=target['labels'],
-                    out_path=Path(DEBUG_OUT,"after_random_affine",f"bboxes_ids.png")
-                )
+            
+        assert len(affine_boxes) == len(target['labels']), f"Mismatch: boxes {len(affine_boxes)} vs labels {len(target['labels'])}"
         #Convert back to normalized xywh and update target['boxes']
-        affine_boxes= torch.from_numpy(affine_boxes).to(dtype=torch.float32)
         affine_boxes = box_xyxy_to_cxcywh(affine_boxes)
         affine_boxes = affine_boxes / torch.tensor([img.shape[1], img.shape[0], img.shape[1], img.shape[0]], dtype=torch.float32)   
         
