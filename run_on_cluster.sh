@@ -1,14 +1,12 @@
 #!/bin/bash
-#SBATCH --export=NUM_GPU=4
-#SBATCH --job-name=train_ycbv
-#SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=128
+#SBATCH --export=NUM_GPU=8
+#SBATCH --job-name=test_training
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=200
 #SBATCH --mem=512G
 #SBATCH --time=30-00:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
-
-
 
 DSNAME=lw_detr6d_data
 
@@ -52,9 +50,9 @@ rootless-docker run --gpus all --shm-size=256g \
                                 --lr_transformer 2e-5 \
                                 --lr_encoder 1e-5 \
                                 --lr_backbone 1e-6 \
-                                --batch_size 24 \
+                                --batch_size 64 \
                                 --weight_decay 1e-4 \
-                                --epochs 1 \
+                                --epochs 200 \
                                 --lr_drop 60 \
                                 --lr_vit_layer_decay 0.8 \
                                 --lr_component_decay 0.7 \
@@ -72,7 +70,7 @@ rootless-docker run --gpus all --shm-size=256g \
                                 --dec_n_points 2 \
                                 --bbox_reparam \
                                 --lite_refpoint_refine \
-                                --num_queries 100 \
+                                --num_queries 50 \
                                 --ia_bce_loss \
                                 --cls_loss_coef 1 \
                                 --num_select 100 \

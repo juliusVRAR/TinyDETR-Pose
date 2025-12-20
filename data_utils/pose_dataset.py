@@ -115,7 +115,7 @@ class PoseDataset(CocoDetection):
                  model_symmetry=None,
                  class_info=None,
                  sample_mesh_points = False, # Only true if we calulate symmetries because we have CAD model information
-                 n_mesh_points=128, # The higher the more VRAM we need but the better the symmetry-aware loss works (T6D samples 1500 points)
+                 n_mesh_points=512, # The higher the more VRAM we need but the better the symmetry-aware loss works (T6D samples 1500 points)
                  mesh_point_seed=0
                  ):
         """
