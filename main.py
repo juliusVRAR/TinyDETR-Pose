@@ -192,7 +192,7 @@ def get_args_parser():
     parser.add_argument('--rgb_augmentation', action='store_true',
                         help='Activate image augmentation for training pose estimation.')
     parser.add_argument('--grayscale', action='store_true', help='Activate grayscale augmentation.')
-    
+    parser.add_argument('--n_mesh_points', default=128, type=int, help='Number of mesh points to sample for symmetry-aware loss For debugging 128 for train 512.')
     # Data augmentations TODO: add yolox6d 
     parser.add_argument('--mosaic_augmentation', action='store_true',
                         help='Whether to use mosaic augmentation (from yolox6d).')

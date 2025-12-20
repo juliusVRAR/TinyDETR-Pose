@@ -115,7 +115,7 @@ class PoseDataset(CocoDetection):
                  model_symmetry=None,
                  class_info=None,
                  sample_mesh_points = False, # Only true if we calulate symmetries because we have CAD model information
-                 n_mesh_points=512, # The higher the more VRAM we need but the better the symmetry-aware loss works (T6D samples 1500 points)
+                 n_mesh_points=128, # The higher the more VRAM we need but the better the symmetry-aware loss works (T6D samples 1500 points)
                  mesh_point_seed=0
                  ):
         """
@@ -149,7 +149,7 @@ class PoseDataset(CocoDetection):
         self.models_info = load_json(Path(cad_models_path, "models_info.json"))
         self.coco = COCO(ann_file)
         self.mesh_point_seed = mesh_point_seed
-        
+        self.n_mesh_points = n_mesh_points
         # Precompute diameter lookup (id -> float)
         self._diameters = {}
         for k, v in self.models_info.items():
@@ -196,7 +196,7 @@ class PoseDataset(CocoDetection):
         # Precompute model points for symmetry-aware loss
         self._model_points = {}
         if sample_mesh_points:
-            cache_file = Path(cad_models_path) / f"mesh_points_n{n_mesh_points}_seed{mesh_point_seed}.pt"
+            cache_file = Path(cad_models_path) / f"mesh_points_n{self.n_mesh_points}_seed{mesh_point_seed}.pt"
             if cache_file.is_file():
                 data = torch.load(cache_file)
                 self._model_points = {int(k): v for k, v in data.items()}
@@ -213,7 +213,7 @@ class PoseDataset(CocoDetection):
                     if ply_path.is_file():
                         model_paths[obj_id] = str(ply_path)
                 # Sample points
-                sampled = precompute_points(model_paths, n=n_mesh_points, seed=mesh_point_seed)
+                sampled = precompute_points(model_paths, n=self.n_mesh_points, seed=mesh_point_seed)
                 # sampled expected: dict[obj_id] -> (N,3) ndarray or tensor
                 for obj_id, pts in sampled.items():
                     if not torch.is_tensor(pts):
@@ -795,6 +795,7 @@ def build(image_set, args):
                           cad_models_path=cad_model_path,
                           model_symmetry=model_symmetry,
                           class_info=class_info,
+                          n_mesh_points=args.n_mesh_points,
                           mesh_point_seed=args.seed)
     
     if args.mosaic_augmentation and 'train' in image_set:
