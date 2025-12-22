@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --export=NUM_GPU=2
 #SBATCH --job-name=test_training
 #SBATCH --gpus-per-node=2
+#SBATCH --export=NUM_GPU=2
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=128G
 #SBATCH --time=30-00:00:00
@@ -9,7 +9,6 @@
 #SBATCH --error=slurm-%x-%j.err
 
 DSNAME=lw_detr6d_data
-
 
 DATAPATH=/opt/cache/$USER
 OUTPATH=$DATAPATH/$DSNAME

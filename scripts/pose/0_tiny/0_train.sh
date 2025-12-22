@@ -9,7 +9,7 @@ python -u -m torch.distributed.launch \
                             --lr_transformer 2e-5 \
                             --lr_encoder 1e-5 \
                             --lr_backbone 1e-6 \
-                            --batch_size 64 \
+                            --batch_size 32 \
                             --weight_decay 1e-4 \
                             --epochs 300 \
                             --lr_drop 60 \
