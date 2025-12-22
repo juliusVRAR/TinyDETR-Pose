@@ -22,3 +22,5 @@ plot*.py
 *.onnx
 *.engine
 output/*
+*.err
+*.out
