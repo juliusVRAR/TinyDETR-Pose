@@ -13,10 +13,10 @@
       "envFile": "${workspaceFolder}/.env"
     },
     {
-      "name": "LWDETR coco demo", // Only works in main branch
+      "name": "Demo 6D", // Only works in main branch
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/demo.py",
+      "program": "${workspaceFolder}/demo6d.py",
       "cwd": "${workspaceFolder}",
       "args": [
         "--encoder", "vit_tiny",
@@ -34,17 +34,18 @@
         "--bbox_reparam",
         "--lite_refpoint_refine",
         "--num_select", "300",
-        "--weights", "/workspace/LWDETR/data/weights/LWDETR_small_60e_coco.pth",
-        "--input", "/workspace/LWDETR/demo/000000496954.jpg",
-        "--output", "/workspace/LWDETR/output/lwdetr_tiny_coco",
+        "--input", "/workspace/LWDETR/data/datasets/bop/test/000048/rgb/000001.png",
+        "--output", "/workspace/LWDETR/output/lwdetr_tiny_ep76",
         "--confidence_threshold", "0.5",
+        "--device", "cuda",
+        "--weights", "/workspace/LWDETR/output/checkpoint0076_new.pth",
 
       ]
     },
 
 
     {
-      "name": "Debug LW-DETR tiny (single proc)",
+      "name": "Train",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
@@ -64,7 +65,7 @@
         "--lr_encoder", "1e-5", // CAEv2 Backbone 
         "--batch_size","24",
         "--weight_decay","1e-4",
-        "--epochs","10",
+        "--epochs","300",
         "--lr_drop","60",
         "--lr_vit_layer_decay","0.8",
         "--lr_component_decay","0.7",
@@ -132,14 +133,14 @@
       ]
     },
     {
-      "name": "Debug Eval (boxes + pose)",
+      "name": "Eval",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
       "console": "integratedTerminal",
       "args": [
         "--eval_only",
-        "--resume", "output/checkpoint0009_new.pth",
+        "--resume", "output/checkpoint0076_new.pth",
         "--dataset_file", "ycbv",
         "--eval_set", "test",
         "--rotation_representation", "6d",
@@ -167,7 +168,9 @@
         "--use_ema",
         "--eval",
         "--dataset_path","data/datasets/bop",
-        "--output_dir", "output/lwdetr_tiny_coco"
+        "--output_dir", "output/lwdetr_tiny_ep76",
+        "--quick_eval"
+        
       ],
       "env": {
         "MASTER_ADDR": "localhost",

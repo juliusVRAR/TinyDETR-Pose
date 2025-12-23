@@ -558,7 +558,52 @@ class SetCriterion(nn.Module):
         losses = {}
         losses["loss_translation"] = loss_translation.sum() / n_obj
         return losses
+    
+    def loss_rotation_gemini(self, outputs, targets, indices, num_boxes):
+        """
+        Geodesic Loss (Safe Trace + Symmetry Handling)
+        """
+        eps = 1e-6
+        idx = self._get_src_permutation_idx(indices)
+        
+        # 1. Get Predictions & Targets
+        src_rot = outputs["pred_rotations"][idx] # [N, 3, 3]
+        tgt_rot = torch.cat([t['relative_rotation'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        
+        # Get Symmetry Labels (Optional but Recommended)
+        # If your dataset doesn't have 'is_symmetric', assume all False
+        if 'is_symmetric' in targets[0]:
+            is_sym = torch.cat([t['is_symmetric'][i] for t, (_, i) in zip(targets, indices)], dim=0).bool()
+        else:
+            is_sym = torch.zeros(src_rot.shape[0], device=src_rot.device, dtype=torch.bool)
 
+        # 2. Compute Product R_pred * R_gt^T
+        # Ideally, this should be Identity if perfect match
+        product = torch.bmm(src_rot, tgt_rot.transpose(1, 2)) # [N, 3, 3]
+
+        # 3. Safe Trace Calculation
+        # sum(diagonal) -> sum over dim 1 of the diagonal elements
+        trace = product.diagonal(dim1=1, dim2=2).sum(-1)
+
+        # 4. Compute Geodesic Distance (Radians)
+        # formula: acos( (Tr - 1) / 2 )
+        # Clamp is vital: Trace can slightly exceed 3.0 or -1.0 due to float errors
+        cosine_val = 0.5 * (trace - 1)
+        cosine_val = torch.clamp(cosine_val, -1 + eps, 1 - eps)
+        rad = torch.acos(cosine_val)
+
+        # 5. Symmetry Handling (Crucial for YCB)
+        # For symmetric objects, R_pred vs R_gt is ambiguous.
+        # Force loss to 0.0 for them, so we rely PURELY on ADD-S for those objects.
+        # Otherwise, this loss fights the ADD-S loss.
+        loss = torch.where(is_sym, torch.zeros_like(rad), rad)
+
+        # 6. Normalize
+        losses = {}
+        # Use sum() / num_boxes as per DETR standard
+        losses["loss_rot"] = loss.sum() / num_boxes
+        
+        return losses
     # geodesic distance loss for rotation matrix
     def loss_rotation(self,
                       outputs,
@@ -992,7 +1037,7 @@ class SetCriterion(nn.Module):
 
             # Compute individual losses
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
-            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rotation_gemini(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
@@ -1799,6 +1844,7 @@ def build(args):
     # you should pass `num_classes` to be 2 (max_obj_id + 1).
     # For more details on this, check the following discussion
     # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
+    
     num_classes = args.num_classes +1 if args.dataset_file != 'ycbv' else 22
     
     device = torch.device(args.device)
@@ -1823,10 +1869,11 @@ def build(args):
     if args.pretrain_weights is not None:
         load_pretrained_weights(model, Path(args.pretrain_weights))
     
-    if  args.resume is None:
+    if args.resume is None:
         model.init_pose_heads()
     else: 
         print(f"Continue training at {args.resume}")
+
     print("Z-Head Bias:", model.dec_trans_z_head.layers[-1].bias.data) 
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': args.cls_loss_coef, 
