@@ -322,8 +322,8 @@ def main(args):
     model, criterion, postprocessors, matcher = build_model(args)
     model.to(device)
     # TODO: Check which one is better in terms of runtime speed
-    #pose_evaluator = build_pose_evaluator(args)
-    pose_evaluator = build_better_pose_evaluator(args)
+    pose_evaluator = build_pose_evaluator(args)
+    #pose_evaluator = build_better_pose_evaluator(args)
     if args.use_ema:
         ema_m = ModelEma(model, decay=args.ema_decay)
     else:
@@ -460,7 +460,7 @@ def main(args):
     if args.eval:
         print("COCO Eval.")
         test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val_coco, base_ds, device, args)
+            model, criterion, postprocessors, data_loader_val, base_ds, device, args)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         if args.resume:
