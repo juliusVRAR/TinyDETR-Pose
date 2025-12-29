@@ -2,19 +2,22 @@
 # PoseDETR Inference Demo (Full Script)
 # ------------------------------------------------------------------------
 import argparse
-import random
+
 from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import json
 from PIL import Image
 from torchvision import transforms
-
+from util.get_param_dicts import get_param_dict
+from util.visualize_object_pose import YCBVVisualizer
+import util.misc as utils
 # --- Import your model builder ---
 # Ensure your PYTHONPATH is set correctly so python can find 'models'
 from models import build_model
 from util.misc import nested_tensor_from_tensor_list
-
+from PIL import Image, ImageDraw, ImageFont
 # YCB-Video Classes (Must match your training index 1-to-1)
 YCB_CLASSES = [
     '__background__', '002_master_chef_can', '003_cracker_box', '004_sugar_box',
@@ -47,7 +50,7 @@ def get_args_parser():
                         help="Type of positional embedding to use on top of the image features")
     parser.add_argument('--out_feature_indexes', default=[-1], type=int, nargs='+', help='only for vit now')
     parser.add_argument('--pretrain_weights', default=None, type=str,)
-    parser.add_argument('--resume', default=None, type=str,)
+    parser.add_argument('--resume', default="inference", type=str,)
     # * Transformer
     parser.add_argument('--dec_layers', default=3, type=int,
                         help="Number of decoding layers in the transformer")
@@ -59,7 +62,7 @@ def get_args_parser():
                         help="Number of attention heads inside the transformer's self-attentions")
     parser.add_argument('--ca_nheads', default=8, type=int,
                         help="Number of attention heads inside the transformer's cross-attentions")
-    parser.add_argument('--num_queries', default=300, type=int,
+    parser.add_argument('--num_queries', default=50, type=int,
                         help="Number of query slots")
     parser.add_argument('--group_detr', default=13, type=int,
                         help="Number of groups to speed up detr training")
@@ -77,6 +80,8 @@ def get_args_parser():
     parser.add_argument('--dataset_file', default='coco')
     parser.add_argument('--num_classes', default=21, type=int,
                         help='number of object classes')
+    parser.add_argument('--cad_models_path', default="None", type=str,
+                        help='path to the folder containing 3D CAD models')
     # * Matcher
     parser.add_argument('--set_cost_class', default=2, type=float,
                         help="Class coefficient in the matching cost")
@@ -84,7 +89,13 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
-
+    parser.add_argument('--set_cost_rotation', default=2.0, type=float,
+                        help="rotation coefficient in the matching cost")
+    parser.add_argument('--set_cost_translation', default=5., type=float,
+                        help="translation coefficient in the matching cost")
+    parser.add_argument('--set_cost_keypoint', default=10., type=float,
+                        help="keypoint coefficient in the matching cost")
+    parser.add_argument('--matcher_type', default="6d", type=str, choices=['hungarian', 'yopo', '6d'],)
     # * Learning rate
     parser.add_argument('--lr', default=1e-4, type=float)
     parser.add_argument('--lr_encoder', default=1.5e-4, type=float)
@@ -117,23 +128,31 @@ def get_args_parser():
     parser.add_argument('--use_varifocal_loss', action='store_true')
     parser.add_argument('--use_position_supervised_loss', action='store_true')
     parser.add_argument('--ia_bce_loss', action='store_true')
+    parser.add_argument('--keypoint_loss_coef', default=10.0, type=float, help='Loss weighing parameter for the keypoints')
+    parser.add_argument('--trans_z_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation z component')
+    parser.add_argument('--trans_xy_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation')
+    parser.add_argument('--rot_loss_coef', default=5.0, type=float, help='Loss weighing parameter for the rotation')
+    parser.add_argument('--adds_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the ADD-S metric. Active after warmup epochs.')
+    parser.add_argument('--warm_up_epochs', default=15, type=int, help='Number of epochs before ADD-S loss multiplier is activated.')
+    
 
     # * Input and output
     parser.add_argument('--input', default=None, required=True,
                         help='"Path to image file."')
     parser.add_argument('--output_dir', default='output',
                         help='Directory to save output visualizations.')
-    parser.add_argument('--confidence_threshold', type=float, default=0.5,
+    parser.add_argument('--confidence_threshold', type=float, default=0.3,
                         help='Minimum score for instance predictions to be shown')
 
-    return parser
     # --- Camera Intrinsics (Defaults to YCB-Video Real Camera) ---
     # NOTE: Change these if testing on a Webcam or different dataset!
-    parser.add_argument('--fx', type=float, default=1066.778)
-    parser.add_argument('--fy', type=float, default=1067.487)
-    parser.add_argument('--cx', type=float, default=312.9869)
-    parser.add_argument('--cy', type=float, default=241.3109)
+    parser.add_argument('--cam_matrix', type=str, default=None,
+                        help='Optional path to a json file containing camera intrinsics matrix.')
 
+    # Inference Options
+    parser.add_argument('--uncertainty_threshold', type=float, default=None,
+                        help='Optional threshold to filter predictions by uncertainty (Laplacian log-variance).')
+   
     return parser
 
 # -------------------------------------------------------------------------
@@ -175,181 +194,121 @@ def resize_pad_with_intrinsics(image, K, target_size=640, divisibility=64):
     
     return image_padded, K_new
 
-# -------------------------------------------------------------------------
-# Helper: Draw 3D Axes
-# -------------------------------------------------------------------------
-def draw_axis(img, R, t, K, dist=None, scale=0.1):
-    """
-    Draw 3D axis on the image. 
-    Red: X, Green: Y, Blue: Z
-    scale: Length of the axis line in Meters (e.g. 0.1 = 10cm)
-    """
-    if dist is None:
-        dist = np.zeros(4)
+def preprocess_image(image_path):
+    image = Image.open(image_path).convert("RGB")
+    orig_image_size = torch.tensor(image.size[::-1])
 
-    # Define 3D points: Origin, X-end, Y-end, Z-end
-    points_3d = np.float32([
-        [0, 0, 0],      # Origin
-        [scale, 0, 0],  # X
-        [0, scale, 0],  # Y
-        [0, 0, scale]   # Z
-    ])
-
-    # Project 3D points to 2D image plane
-    # cv2.projectPoints expects rotation vector (Rodrigues), not matrix
-    r_vec, _ = cv2.Rodrigues(R) 
-    
-    points_2d, _ = cv2.projectPoints(points_3d, r_vec, t, K, dist)
-    points_2d = points_2d.astype(int).reshape(-1, 2)
-
-    origin = tuple(points_2d[0])
-    pt_x = tuple(points_2d[1])
-    pt_y = tuple(points_2d[2])
-    pt_z = tuple(points_2d[3])
-
-    # Draw Lines (BGR Colors in OpenCV)
-    # Origin -> X (Red)
-    img = cv2.line(img, origin, pt_x, (0, 0, 255), 3)  
-    # Origin -> Y (Green)
-    img = cv2.line(img, origin, pt_y, (0, 255, 0), 3)  
-    # Origin -> Z (Blue)
-    img = cv2.line(img, origin, pt_z, (255, 0, 0), 3)  
-    
-    return img
-
-# -------------------------------------------------------------------------
-# Main Logic
-# -------------------------------------------------------------------------
-def main(args):
-    # 1. Setup
-    device = torch.device(args.device)
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    
-    # 2. Build Model
-    # Note: args.num_queries (20) will override the default here
-    model, _, _ = build_model(args)
-    model.to(device)
-    model.eval()
-
-    # 3. Load Weights
-    print(f"Loading weights from {args.weights}...")
-    checkpoint = torch.load(args.weights, map_location='cpu')
-    state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
-    
-    # Strict=False is CRITICAL because your checkpoint has Aux Heads (training only)
-    # that are not used in inference.
-    model.load_state_dict(state_dict, strict=False) 
-
-    # 4. Prepare Input & Intrinsics
-    img_bgr = cv2.imread(args.input)
-    if img_bgr is None:
-        raise ValueError(f"Could not load image: {args.input}")
-    
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    
-    # Define Original Intrinsics (K) from args
-    K_orig = np.array([
-        [args.fx, 0, args.cx],
-        [0, args.fy, args.cy],
-        [0, 0, 1]
-    ], dtype=np.float32)
-    
-    # Resize & Pad (Updating K)
-    img_padded, K_new = resize_pad_with_intrinsics(img_rgb, K_orig)
-    
-    # Convert to Tensor (Normalize with ImageNet stats)
-    transform_norm = transforms.Compose([
+    normalize = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    
-    tensor_img = transform_norm(img_padded).to(device)
-    
-    # Create Nested Tensor (Standard DETR input)
-    samples = nested_tensor_from_tensor_list([tensor_img])
-    
-    # 5. Prepare Dummy Target (To pass intrinsics to Model)
-    # The model needs 'intrinsics' in the targets dict to perform Back-Projection
-    # inside the forward() pass.
-    K_tensor = torch.from_numpy(K_new).to(device)
-    
-    # Important: Create a list of dicts (one per image in batch)
-    dummy_targets = [{'intrinsics': K_tensor}]
+    transform = transforms.Compose([
+            transforms.Resize([640, 640]),
+            normalize,
+        ])
+    image = transform(image)
+    return image, orig_image_size
 
-    # 6. Inference
-    print(f"Running Inference on {args.device}...")
+def visualize_detections(image, boxes, labels, scores, conf_thresh, output_path):
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+
+    for box, label, score in zip(boxes, labels, scores):
+        if score > conf_thresh:
+            xmin, ymin, xmax, ymax = map(int, box)
+            draw.rectangle([xmin, ymin, xmax, ymax], outline="green", width=2)
+            text = f"{YCB_CLASSES[label]} {score:.2f}"
+            draw.text((xmin, ymin - 10), text, fill="black", font=font)
+
+    image.save(output_path)
+def main(args):
+    with open(args.cam_matrix) as f:
+        K = json.load(f)
+        print(K)
+        # Define Original Intrinsics (K) from args
+    K_orig = np.array([
+        [K["fx"], 0, K["cx"]],
+        [0, K["fy"], K["cy"]],
+        [0, 0, 1]
+    ], dtype=np.float32)    
+    viz = YCBVVisualizer(args.cad_models_path)
+    
+    utils.init_distributed_mode(args)
+    print(args)
+
+    device = torch.device(args.device)
+
+    model, _, postprocessors, _ = build_model(args)
+    model.to(device)
+    model.eval()
+
+    param_dicts = get_param_dict(args, model)
+
+    output_path = Path(args.output_dir) /  "visualize.jpg"
+
+    if args.weights:
+        checkpoint = torch.load(args.weights, map_location='cpu')
+        model.load_state_dict(checkpoint['model'], strict=True)
+
+    # preprocess
+    image, orig_image_size = preprocess_image(args.input)
+    image = image.to(device)
+    orig_image_size = orig_image_size.to(device)
+
+    images = nested_tensor_from_tensor_list([image])
+    orig_image_sizes = torch.stack([orig_image_size])
+
+    # forward
     with torch.no_grad():
-        outputs = model(samples, dummy_targets)
+        outputs = model(images)
 
-    # 7. Extract Predictions
-    # outputs['pred_logits']:      [B, Q, NumClasses]
-    # outputs['pred_rotations']:   [B, Q, 3, 3]
-    # outputs['pred_translation']: [B, Q, 3] (Meters)
-    # outputs['pred_z_log_var']:   [B, Q]    (Uncertainty)
-    
-    pred_logits = outputs['pred_logits'][0]
-    pred_rot = outputs['pred_rotations'][0].cpu().numpy()
-    pred_trans = outputs['pred_translation'][0].cpu().numpy()
-    pred_log_var = outputs['pred_z_log_var'][0].cpu().numpy()
-    
-    # Softmax for probabilities
-    probs = pred_logits.softmax(-1)[..., :-1] # Exclude background
-    scores, labels = probs.max(-1)
-    
-    # 8. Visualization Loop
-    # Prepare canvas (use padded image to align with K_new)
-    # Convert back to BGR for OpenCV
-    canvas = cv2.cvtColor(img_padded, cv2.COLOR_RGB2BGR)
-    
-    print("\n--- Detections ---")
-    found_obj = False
-    
-    for i in range(pred_logits.shape[0]):
-        score = scores[i].item()
-        label = labels[i].item()
-        uncertainty = pred_log_var[i].item() # Laplacian Log-Variance
-        
-        # Filter by Confidence Score
-        if score > args.confidence_threshold:
-            
-            # Optional: Filter by Uncertainty
-            if args.uncertainty_threshold is not None:
-                if uncertainty > args.uncertainty_threshold:
-                    print(f"Skipping Object {label} (Score: {score:.2f}) due to High Uncertainty: {uncertainty:.2f}")
-                    continue
+    # postprocess
+    predictions = postprocessors['bbox'](outputs, orig_image_sizes)
 
-            found_obj = True
-            obj_name = YCB_CLASSES[label] if label < len(YCB_CLASSES) else str(label)
-            
-            # Console Log
-            print(f"Found {obj_name:<20} | Score: {score:.2f} | Dist: {pred_trans[i, 2]:.2f}m | Unc (σ): {uncertainty:.2f}")
-            
-            # Draw Axis
-            # R=pred_rot[i], t=pred_trans[i], K=K_new
-            draw_axis(canvas, pred_rot[i], pred_trans[i], K_new, scale=0.08) # 8cm axis length
-            
-            # Draw Text Label
-            # Project Center to find where to put text
-            center_3d = pred_trans[i]
-            # Project 3D point to 2D
-            center_2d, _ = cv2.projectPoints(center_3d.reshape(1,3), np.zeros(3), np.zeros(3), K_new, None)
-            uv = center_2d.reshape(-1).astype(int)
-            
-            label_text = f"{obj_name} {score:.2f}"
-            cv2.putText(canvas, label_text, (uv[0], uv[1]-10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            cv2.putText(canvas, f"Unc: {uncertainty:.1f}", (uv[0], uv[1]+15), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+    # 2D Detections
+    boxes = predictions[0]['boxes'].cpu().numpy()
+    labels = predictions[0]['labels'].cpu().numpy()
+    scores = predictions[0]['scores'].cpu().numpy()
+    # 6D Poses 
+    rots = predictions[0]['rotations'].cpu().numpy()
+    trans = predictions[0]['trans'].cpu().numpy()
+    trans_z = predictions[0]['trans_z'].cpu().numpy()
+    z_log_var = predictions[0]['z_log_var'].cpu().numpy()
+    keypoints = predictions[0]['keypoints'].cpu().numpy()
+    
 
-    if not found_obj:
-        print("No objects found above threshold.")
+    print("Visualize 2D Detections...")
+    original_image = Image.open(args.input).convert("RGB")
+    visualize_detections(
+        original_image,
+        boxes,
+        labels,
+        scores,
+        args.confidence_threshold,
+        output_path)
+    print("Visualize object poses...")
+    im = np.array(original_image)
+     # Visualization of 3D bboxes and overalayed objects
+    vis_img = im[:,:,::-1].copy()
+    vis_img = viz.visualize_single_image(vis_img                                                                                                         , 
+                                        annotations={'labels': labels, 
+                                                    "relative_position":trans, 
+                                                    "relative_rotation":rots,
+                                                    },
+                                            K=K_orig,
+                                            show_mesh=True,
+                                            sample_points=5000,
+                                            conf_threshold=args.confidence_threshold,
+                                            scores=scores)
+    cv2.imwrite(Path(args.output_dir, "vis3d.jpg"), vis_img) # Visualization of 3D bboxes and overalayed objects
+    return
 
-    # 9. Save
-    out_path = Path(args.output_dir) / "pose_result.jpg"
-    cv2.imwrite(str(out_path), canvas)
-    print(f"\nSaved visualization to {out_path}")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('PoseDETR Inference Script', parents=[get_args_parser()])
+    parser = argparse.ArgumentParser('LWDETR infer script', parents=[get_args_parser()])
     args = parser.parse_args()
+
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
     main(args)

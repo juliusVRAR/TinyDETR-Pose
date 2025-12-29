@@ -1761,7 +1761,9 @@ class PostProcess(nn.Module):
                           For visualization, this should be the image size after data augment, but before padding
         """
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
-
+        # 6D Poses
+        out_translations, out_trans_z, out_uv, out_rot, out_z_log_var = outputs['pred_translations'], outputs['pred_trans_z'], outputs['pred_uv_norm'], outputs['pred_rotations'], outputs['pred_z_log_var']
+         
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
 
@@ -1778,7 +1780,27 @@ class PostProcess(nn.Module):
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
 
-        results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
+        # and 6D Poses
+        topk_rotations = topk_indexes // out_logits.shape[2]
+        rotations = torch.gather(out_rot, 1, topk_rotations.unsqueeze(-1).unsqueeze(-1).repeat(1,1,3,3))
+        
+        topk_uv = topk_indexes // out_logits.shape[2]
+        uvs = torch.gather(out_uv, 1, topk_uv.unsqueeze(-1).repeat(1,1,2))
+        # Denormalize uv
+        uv_scale_fct = torch.stack([img_w, img_h], dim=1)
+        keypoints = uvs * uv_scale_fct[:, None, :]
+
+        topk_translations = topk_indexes // out_logits.shape[2]
+        translations = torch.gather(out_translations, 1, topk_translations.unsqueeze(-1).repeat(1,1,3))
+
+        topk_trans_z = topk_indexes // out_logits.shape[2]
+        trans_z = torch.gather(out_trans_z.unsqueeze(-1), 1, topk_trans_z.unsqueeze(-1).repeat(1,1,1))
+        
+        topk_log_va_z = topk_indexes // out_logits.shape[2]
+        z_log_var = torch.gather(out_z_log_var.unsqueeze(-1), 1, topk_log_va_z.unsqueeze(-1).repeat(1,1,1))
+
+        results = [{'scores': s, 'labels': l, 'boxes': b, 'rotations': r, 'keypoints': u, 'trans': t, 'trans_z': tz, 'z_log_var': zlv} for s, l, b, r, u, t, tz, zlv in zip(scores, labels, boxes, rotations, keypoints, translations, trans_z, z_log_var)]
+
 
         return results
 

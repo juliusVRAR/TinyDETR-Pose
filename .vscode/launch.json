@@ -9,7 +9,7 @@
       "program": "${file}",
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
-      "justMyCode": true,
+      "justMyCode": false,
       "envFile": "${workspaceFolder}/.env"
     },
     {
@@ -18,28 +18,31 @@
       "request": "launch",
       "program": "${workspaceFolder}/demo6d.py",
       "cwd": "${workspaceFolder}",
+      "justMyCode": false,
       "args": [
         "--encoder", "vit_tiny",
-        "--vit_encoder_num_layers", "10",
-        "--window_block_indexes", "0", "1", "3", "6", "7", "9",
-        "--out_feature_indexes", "2", "4", "5", "9",
+         "--vit_encoder_num_layers","6",
+        "--window_block_indexes","0","2","4",
+        "--out_feature_indexes","1","3","5",
         "--dec_layers", "3",
         "--group_detr", "13",
         "--two_stage",
-        "--projector_scale", "P4",
-        "--hidden_dim", "256",
-        "--sa_nheads", "8",
-        "--ca_nheads", "16",
-        "--dec_n_points", "2",
+        "--projector_scale","P4",
+        "--hidden_dim","256",
+        "--sa_nheads","8",
+        "--ca_nheads","16",
+        "--dec_n_points","2",
         "--bbox_reparam",
         "--lite_refpoint_refine",
-        "--num_select", "300",
+        "--num_select", "100",
         "--input", "/workspace/LWDETR/data/datasets/bop/test/000048/rgb/000001.png",
-        "--output", "/workspace/LWDETR/output/lwdetr_tiny_ep76",
-        "--confidence_threshold", "0.5",
+        "--output", "/workspace/LWDETR/output/lwdetr_tiny_ep49",
+        "--confidence_threshold", "0.3",
         "--device", "cuda",
-        "--weights", "/workspace/LWDETR/output/checkpoint0076_new.pth",
-
+        "--weights", "/workspace/LWDETR/output/checkpoint0049_new.pth",
+        "--num_queries","100",
+        "--cad_models_path", "/workspace/LWDETR/data/datasets/bop/models",
+        "--cam_matrix", "/workspace/LWDETR/data/datasets/bop/camera.json"
       ]
     },
 
@@ -122,11 +125,10 @@
         "class_embed.bias",
         "--grayscale",
         "--rgb_augmentation",
-        "--mosaic_augmentation",
+        //"--mosaic_augmentation",
         "--tensorboard",
         "--matcher_type", "6d",
         "--pretrained_encoder", "/workspace/LWDETR/data/weights/caev2_tiny_S_300e_objects365.pth",
-        //"--resume", "output/checkpoint0009_new.pth",
         "--pretrain_weights", "data/weights/LWDETR_tiny_60e_coco.pth",
         "--n_mesh_points", "128",
         "--output_dir", "output/debug_lwdetr_tiny"
@@ -140,7 +142,7 @@
       "console": "integratedTerminal",
       "args": [
         "--eval_only",
-        "--resume", "output/checkpoint0076_new.pth",
+        "--resume", "output/checkpoint0049_new.pth",
         "--dataset_file", "ycbv",
         "--eval_set", "test",
         "--rotation_representation", "6d",
@@ -168,8 +170,8 @@
         "--use_ema",
         "--eval",
         "--dataset_path","data/datasets/bop",
-        "--output_dir", "output/lwdetr_tiny_ep76",
-        "--quick_eval"
+        "--output_dir", "output/lwdetr_tiny_ep49",
+        
         
       ],
       "env": {

@@ -556,7 +556,9 @@ class YCBVVisualizer:
                                annotations: dict, 
                                K: Optional[np.ndarray] = None, 
                                show_mesh=False, 
-                               sample_points=1000):
+                               sample_points=1000,
+                               conf_threshold: Optional[float] = None,
+                               scores: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Visualize a single image with 3D models and bounding boxes
         
@@ -606,7 +608,7 @@ class YCBVVisualizer:
 
         N = rel_pos_np.shape[0]
 
-       # Build per-object K list
+        # Build per-object K list
         if intrinsics_rows is not None:
             if hasattr(intrinsics_rows, "cpu"):
                 intrinsics_rows = intrinsics_rows.cpu().numpy()
@@ -619,53 +621,54 @@ class YCBVVisualizer:
                                 [0,  0,   1]], dtype=np.float32)
                 Ks_list.append(K_i)
             
-            for label, rot, trans, K in zip(annotations["labels"], annotations["relative_rotation"], annotations["relative_position"], Ks_list):
-                obj_id = label
-                R = np.array(rot).reshape(3, 3)
-                trans = trans*1000.0 # In the dataset the translation is in meters, convert to mm.
-                t = np.array(trans).flatten()
-                
-                try:
-                    mesh = self.load_model(obj_id)
-                except FileNotFoundError:
-                    print(f"Warning: Model for obj_id {obj_id} not found, skipping...")
-                    continue
-                
-                # Generate random color for this object
-                np.random.seed(obj_id)  # Consistent color per object
-                color = tuple(np.random.randint(100, 255, 3).tolist())
-                
-                # Get 3D bounding box
-                bbox_3d = self.get_3d_bbox(mesh)
-                
-                # Transform bbox to camera coordinates and project to 2D
-                bbox_2d = self.project_points(bbox_3d, K, R, t)
-                
-                # Draw bounding box
-                vis_img = self.draw_3d_bbox(vis_img, bbox_2d, color, 2)
-                
-                # Overlay CAD model if requested
-                if show_mesh:
-                    vertices = mesh.vertices.copy()
+            for label, rot, trans, K, score in zip(annotations["labels"], annotations["relative_rotation"], annotations["relative_position"], Ks_list, scores if scores is not None else [1.0]*N):
+                if score > conf_threshold:
+                    obj_id = label
+                    R = np.array(rot).reshape(3, 3)
+                    trans = trans*1000.0 # In the dataset the translation is in meters, convert to mm.
+                    t = np.array(trans).flatten()
                     
-                    # Sample vertices for visualization
-                    if len(vertices) > sample_points:
-                        indices = np.random.choice(len(vertices), sample_points, replace=False)
-                        vertices = vertices[indices]
+                    try:
+                        mesh = self.load_model(obj_id)
+                    except FileNotFoundError:
+                        print(f"Warning: Model for obj_id {obj_id} not found, skipping...")
+                        continue
                     
-                    # Project vertices
-                    vertices_2d = self.project_points(vertices, K, R, t)
+                    # Generate random color for this object
+                    np.random.seed(obj_id)  # Consistent color per object
+                    color = tuple(np.random.randint(100, 255, 3).tolist())
                     
-                    # Draw mesh points
-                    for pt in vertices_2d:
-                        if 0 <= pt[0] < img.shape[1] and 0 <= pt[1] < img.shape[0]:
-                            cv2.circle(vis_img, tuple(pt.astype(int)), 1, color, -1)
+                    # Get 3D bounding box
+                    bbox_3d = self.get_3d_bbox(mesh)
+                    
+                    # Transform bbox to camera coordinates and project to 2D
+                    bbox_2d = self.project_points(bbox_3d, K, R, t)
+                    
+                    # Draw bounding box
+                    vis_img = self.draw_3d_bbox(vis_img, bbox_2d, color, 2)
+                    
+                    # Overlay CAD model if requested
+                    if show_mesh:
+                        vertices = mesh.vertices.copy()
+                        
+                        # Sample vertices for visualization
+                        if len(vertices) > sample_points:
+                            indices = np.random.choice(len(vertices), sample_points, replace=False)
+                            vertices = vertices[indices]
+                        
+                        # Project vertices
+                        vertices_2d = self.project_points(vertices, K, R, t)
+                        
+                        # Draw mesh points
+                        for pt in vertices_2d:
+                            if 0 <= pt[0] < img.shape[1] and 0 <= pt[1] < img.shape[0]:
+                                cv2.circle(vis_img, tuple(pt.astype(int)), 1, color, -1)
+                    
+                    # Add label
+                    center_2d = bbox_2d.mean(axis=0).astype(int)
+                    cv2.putText(vis_img, f'obj_{obj_id}_{score:.2f}', tuple(center_2d), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
                 
-                # Add label
-                center_2d = bbox_2d.mean(axis=0).astype(int)
-                cv2.putText(vis_img, f'obj_{obj_id}', tuple(center_2d), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
-            
             return vis_img
 
             
@@ -675,52 +678,53 @@ class YCBVVisualizer:
                 K = K.cpu().numpy()
             K = np.array(K).reshape(3, 3)
             
-            for label, rot, trans in zip(annotations["labels"], annotations["relative_rotation"], annotations["relative_position"]):
-                obj_id = label
-                R = np.array(rot).reshape(3, 3)
-                trans = trans*1000.0 # In the dataset the translation is in meters, convert to mm.
-                t = np.array(trans).flatten()
-                
-                try:
-                    mesh = self.load_model(obj_id)
-                except FileNotFoundError:
-                    print(f"Warning: Model for obj_id {obj_id} not found, skipping...")
-                    continue
-                
-                # Generate random color for this object
-                np.random.seed(obj_id)  # Consistent color per object
-                color = tuple(np.random.randint(100, 255, 3).tolist())
-                
-                # Get 3D bounding box
-                bbox_3d = self.get_3d_bbox(mesh)
-                
-                # Transform bbox to camera coordinates and project to 2D
-                bbox_2d = self.project_points(bbox_3d, K, R, t)
-                
-                # Draw bounding box
-                vis_img = self.draw_3d_bbox(vis_img, bbox_2d, color, 2)
-                
-                # Overlay CAD model if requested
-                if show_mesh:
-                    vertices = mesh.vertices.copy()
+            for label, rot, trans, score in zip(annotations["labels"], annotations["relative_rotation"], annotations["relative_position"], scores if scores is not None else [1.0]*N):
+                if score > conf_threshold:
+                    obj_id = label
+                    R = np.array(rot).reshape(3, 3)
+                    trans = trans*1000.0 # In the dataset the translation is in meters, convert to mm.
+                    t = np.array(trans).flatten()
                     
-                    # Sample vertices for visualization
-                    if len(vertices) > sample_points:
-                        indices = np.random.choice(len(vertices), sample_points, replace=False)
-                        vertices = vertices[indices]
+                    try:
+                        mesh = self.load_model(obj_id)
+                    except FileNotFoundError:
+                        print(f"Warning: Model for obj_id {obj_id} not found, skipping...")
+                        continue
                     
-                    # Project vertices
-                    vertices_2d = self.project_points(vertices, K, R, t)
+                    # Generate random color for this object
+                    np.random.seed(obj_id)  # Consistent color per object
+                    color = tuple(np.random.randint(100, 255, 3).tolist())
                     
-                    # Draw mesh points
-                    for pt in vertices_2d:
-                        if 0 <= pt[0] < img.shape[1] and 0 <= pt[1] < img.shape[0]:
-                            cv2.circle(vis_img, tuple(pt.astype(int)), 1, color, -1)
-                
-                # Add label
-                center_2d = bbox_2d.mean(axis=0).astype(int)
-                cv2.putText(vis_img, f'obj_{obj_id}', tuple(center_2d), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
+                    # Get 3D bounding box
+                    bbox_3d = self.get_3d_bbox(mesh)
+                    
+                    # Transform bbox to camera coordinates and project to 2D
+                    bbox_2d = self.project_points(bbox_3d, K, R, t)
+                    
+                    # Draw bounding box
+                    vis_img = self.draw_3d_bbox(vis_img, bbox_2d, color, 2)
+                    
+                    # Overlay CAD model if requested
+                    if show_mesh:
+                        vertices = mesh.vertices.copy()
+                        
+                        # Sample vertices for visualization
+                        if len(vertices) > sample_points:
+                            indices = np.random.choice(len(vertices), sample_points, replace=False)
+                            vertices = vertices[indices]
+                        
+                        # Project vertices
+                        vertices_2d = self.project_points(vertices, K, R, t)
+                        
+                        # Draw mesh points
+                        for pt in vertices_2d:
+                            if 0 <= pt[0] < img.shape[1] and 0 <= pt[1] < img.shape[0]:
+                                cv2.circle(vis_img, tuple(pt.astype(int)), 1, color, -1)
+                    
+                    # Add label
+                    center_2d = bbox_2d.mean(axis=0).astype(int)
+                    cv2.putText(vis_img, f'obj_{obj_id}_{score:.2f}', tuple(center_2d), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
             
             return vis_img
 
