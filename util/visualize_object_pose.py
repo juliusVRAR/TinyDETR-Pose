@@ -13,7 +13,7 @@ from torchvision.io import write_png
 import random
 from pathlib import Path
 import trimesh
-
+from PIL import Image
 
 class Colors:
     # Ultralytics color palette https://ultralytics.com/
@@ -873,3 +873,42 @@ def draw_6d_pose(img,
         cv2.imwrite(outfile_mask, img_mask)
         cv2.imwrite(outfile_2d_od, img_2dod)
     return img_cuboid, img_mask, img_2dod
+
+def draw_object_centers(img_input, centers_xy, conf=None, scores=None, radius=4, color=(0, 255, 0)):
+    """
+    Draw circles for object centers.
+    Accepts:
+      - torch.Tensor (C,H,W) in [0,1]
+      - PIL.Image
+      - np.ndarray (H,W,C) uint8 RGB or BGR
+    centers_xy: (N,2) pixel coords (u,v)
+    Returns BGR uint8 ndarray.
+    """
+    if centers_xy is None or len(centers_xy) == 0:
+        # Just convert and return
+        if isinstance(img_input, torch.Tensor):
+            img = (img_input.permute(1,2,0).numpy().clip(0,1) * 255).astype(np.uint8)
+        elif isinstance(img_input, Image.Image):
+            img = np.array(img_input)
+        else:
+            img = img_input
+        return img[..., ::-1].copy()  # BGR
+    # Normalize input to RGB uint8
+    if isinstance(img_input, torch.Tensor):
+        img = (img_input.permute(1,2,0).numpy().clip(0,1) * 255).astype(np.uint8)
+    elif isinstance(img_input, Image.Image):
+        img = np.array(img_input)
+    else:
+        img = img_input
+    # If grayscale expand
+    if img.ndim == 2:
+        img = np.repeat(img[:, :, None], 3, axis=2)
+    # Assume current img is RGB; convert to BGR for OpenCV drawing
+    img_bgr = img[..., ::-1].copy()
+    for (u, v) in centers_xy.tolist():
+        if conf is not None and scores is not None:
+            idx = centers_xy.tolist().index([u, v])
+            if scores[idx] < conf:
+                continue
+        cv2.circle(img_bgr, (int(round(u)), int(round(v))), radius, color, -1, lineType=cv2.LINE_AA)
+    return img_bgr

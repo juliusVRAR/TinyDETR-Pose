@@ -11,7 +11,7 @@ import json
 from PIL import Image
 from torchvision import transforms
 from util.get_param_dicts import get_param_dict
-from util.visualize_object_pose import YCBVVisualizer
+from util.visualize_object_pose import YCBVVisualizer, draw_object_centers
 import util.misc as utils
 # --- Import your model builder ---
 # Ensure your PYTHONPATH is set correctly so python can find 'models'
@@ -218,7 +218,7 @@ def visualize_detections(image, boxes, labels, scores, conf_thresh, output_path)
             xmin, ymin, xmax, ymax = map(int, box)
             draw.rectangle([xmin, ymin, xmax, ymax], outline="green", width=2)
             text = f"{YCB_CLASSES[label]} {score:.2f}"
-            draw.text((xmin, ymin - 10), text, fill="black", font=font)
+            draw.text((xmin, ymin - 10), text, fill="white", font=font)
 
     image.save(output_path)
 def main(args):
@@ -286,6 +286,7 @@ def main(args):
         scores,
         args.confidence_threshold,
         output_path)
+    
     print("Visualize object poses...")
     im = np.array(original_image)
      # Visualization of 3D bboxes and overalayed objects
@@ -301,6 +302,12 @@ def main(args):
                                             conf_threshold=args.confidence_threshold,
                                             scores=scores)
     cv2.imwrite(Path(args.output_dir, "vis3d.jpg"), vis_img) # Visualization of 3D bboxes and overalayed objects
+    
+    print("Visualize keypoints...")
+    
+    vis_img = vis_img[:,:,::-1].copy()
+    vis_img = draw_object_centers(img_input=vis_img, centers_xy=keypoints, conf=args.confidence_threshold, scores=scores)
+    cv2.imwrite(Path(args.output_dir, "keypoints.jpg"), vis_img)
     return
 
 

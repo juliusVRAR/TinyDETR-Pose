@@ -1801,7 +1801,6 @@ class PostProcess(nn.Module):
 
         results = [{'scores': s, 'labels': l, 'boxes': b, 'rotations': r, 'keypoints': u, 'trans': t, 'trans_z': tz, 'z_log_var': zlv} for s, l, b, r, u, t, tz, zlv in zip(scores, labels, boxes, rotations, keypoints, translations, trans_z, z_log_var)]
 
-
         return results
 
 
