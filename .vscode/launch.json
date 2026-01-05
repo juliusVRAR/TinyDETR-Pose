@@ -13,7 +13,7 @@
       "envFile": "${workspaceFolder}/.env"
     },
     {
-      "name": "Demo 6D", // Only works in main branch
+      "name": "Demo Tiny", // Only works in main branch
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/demo6d.py",
@@ -36,16 +36,49 @@
         "--lite_refpoint_refine",
         "--num_select", "100",
         "--input", "/workspace/LWDETR/data/datasets/bop/test/000048/rgb/000001.png",
-        "--output", "/workspace/LWDETR/output/lwdetr_tiny_ep49",
-        "--confidence_threshold", "0.3",
+        "--confidence_threshold", "0.35",
         "--device", "cuda",
-        "--weights", "/workspace/LWDETR/output/checkpoint0049_new.pth",
+        "--weights", "/workspace/LWDETR/output/checkpoint0097_newTINY.pth",
+        "--output", "/workspace/LWDETR/output/lwdetr_tiny_ep97",
         "--num_queries","100",
         "--cad_models_path", "/workspace/LWDETR/data/datasets/bop/models",
         "--cam_matrix", "/workspace/LWDETR/data/datasets/bop/camera.json"
       ]
     },
 
+    {
+      "name": "Demo XL", // Only works in main branch
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/demo6d.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": [
+        "--encoder", "vit_base",
+         "--vit_encoder_num_layers","10",
+        "--window_block_indexes","0","1","3","6","7","9",
+        "--out_feature_indexes","2","4","5","9",
+        "--dec_layers", "3",
+        "--group_detr", "13",
+        "--two_stage",
+        "--projector_scale","P3", "P5",
+        "--hidden_dim","384",
+        "--sa_nheads","12",
+        "--ca_nheads","24",
+        "--dec_n_points","4",
+        "--bbox_reparam",
+        "--lite_refpoint_refine",
+        "--num_select", "100",
+        "--input", "/workspace/LWDETR/data/datasets/bop/test/000048/rgb/000001.png",
+        "--confidence_threshold", "0.5",
+        "--device", "cuda",
+        "--output", "/workspace/LWDETR/output/lwdetr_xl_ep49",
+        "--weights", "/workspace/LWDETR/output/checkpoint0049_newXL.pth",
+        "--num_queries","100",
+        "--cad_models_path", "/workspace/LWDETR/data/datasets/bop/models",
+        "--cam_matrix", "/workspace/LWDETR/data/datasets/bop/camera.json"
+      ]
+    },
 
     {
       "name": "Train",
@@ -135,14 +168,13 @@
       ]
     },
     {
-      "name": "Eval",
+      "name": "Eval Tiny",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
       "console": "integratedTerminal",
       "args": [
         "--eval_only",
-        "--resume", "output/checkpoint0049_new.pth",
         "--dataset_file", "ycbv",
         "--eval_set", "test",
         "--rotation_representation", "6d",
@@ -170,7 +202,59 @@
         "--use_ema",
         "--eval",
         "--dataset_path","data/datasets/bop",
-        "--output_dir", "output/lwdetr_tiny_ep49",
+        "--resume", "output/checkpoint0061_new.pth",
+        "--output_dir", "output/lwdetr_tiny_ep61",
+        "--quick_eval"
+        
+      ],
+      "env": {
+        "MASTER_ADDR": "localhost",
+        "MASTER_PORT": "12355",
+        "WORLD_SIZE": "1",
+        "RANK": "0",
+        "LOCAL_RANK": "0",
+        "LOCAL_SIZE": "1"
+      }
+    },
+
+    {
+      "name": "Eval XL",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--eval_only",
+        "--dataset_file", "ycbv",
+        "--eval_set", "test",
+        "--rotation_representation", "6d",
+        "--eval_batches", "0",
+        "--output_dir", "output",
+        "--batch_size", "8",
+        "--encoder", "vit_base",
+        "--vit_encoder_num_layers","10",
+        "--window_block_indexes","0","1","3","6","7","9",
+        "--out_feature_indexes","2","4","5","9",
+        "--dec_layers", "3",
+        "--group_detr", "13",
+        "--two_stage",
+        "--projector_scale","P3", "P5",
+        "--hidden_dim","384",
+        "--sa_nheads","12",
+        "--ca_nheads","24",
+        "--dec_n_points","4",
+        "--bbox_reparam",
+        "--lite_refpoint_refine",
+        "--num_queries", "100",
+        "--num_select", "100",
+        "--dataset_file", "ycbv",
+        "--square_resize_div_64",
+        "--use_ema",
+        "--eval",
+        "--dataset_path","data/datasets/bop",
+        "--resume", "output/checkpoint0049_newXL.pth",
+        "--output_dir", "output/lwdetr_XL_ep49",
+        
         
         
       ],
