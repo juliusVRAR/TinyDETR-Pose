@@ -319,9 +319,11 @@ def pose_evaluate(model,
     print("Start results evaluation")
     start_time = time.time()
     print("Start Calculating ADD")
-    pose_evaluator.evaluate_pose_add(output_eval_dir)
+    results_add = pose_evaluator.evaluate_pose_adds(output_eval_dir)
+
     print("Start Calculating ADD-S")
-    pose_evaluator.evaluate_pose_adi(output_eval_dir)
+    results_adi= pose_evaluator.evaluate_pose_adi(output_eval_dir)
+
     print("Start Calculating ADD(-S)")
     results_adds = pose_evaluator.evaluate_pose_adds(output_eval_dir)
     print("Start Calculating Average Translation Error")
@@ -331,7 +333,8 @@ def pose_evaluate(model,
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Evaluation time: {}".format(total_time_str))
-    return results_adds
+    return results_add, results_adi, results_adds # ADD, ADD-S, ADD(-S)
+
 @torch.no_grad()
 def bop_evaluate(model, matcher, data_loader, image_set, bbox_mode, rotation_mode, device, output_dir):
     """
@@ -362,9 +365,6 @@ def bop_evaluate(model, matcher, data_loader, image_set, bbox_mode, rotation_mod
 
         pred_translations = outputs_without_aux["pred_translation"][idx].detach().cpu().numpy()
         pred_rotations = outputs_without_aux["pred_rotation"][idx].detach().cpu().numpy()
-
-        if rotation_mode in ['quat', 'silho_quat']:
-            pred_rotations = quat2rot(pred_rotations)
 
         obj_classes_idx = torch.cat([t['labels'][i] for t, (_, i) in zip(targets, indices)],
                                     dim=0).detach().cpu().numpy()

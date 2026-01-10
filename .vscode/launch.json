@@ -124,7 +124,7 @@
         "--cls_loss_coef","1",
         "--num_select","100",
         "--dataset_file","ycbv",
-        "--dataset_path","data/datasets/bop",
+        "--dataset_path","data/datasets/bop/ycbv",
         "--square_resize_div_64",
         "--use_ema",
         "--pretrain_keys_modify_to_load", // We can use this instead of the function in the build lwdetr6d

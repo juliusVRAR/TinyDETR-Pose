@@ -575,8 +575,8 @@ def main(args):
             # Last epoch: force full evaluation (ignore quick_eval flag)
             is_last_epoch = (epoch + 1) == args.epochs
             quick_mode = is_last_epoch
-
-            current_adds_score = pose_evaluate(
+            # ADD, ADD-S, ADD(-S)
+            current_add_score, current_adi_score, current_adds_score = pose_evaluate(
                 model=model,
                 matcher=matcher,
                 pose_evaluator=pose_evaluator,
@@ -590,6 +590,12 @@ def main(args):
                 
             )
             print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
+
+            # TensorBoard logging for pose metrics
+            if writer:
+                writer.add_scalar("val/pose_ADD", current_add_score, epoch)
+                writer.add_scalar("val/pose_ADI", current_adi_score, epoch)
+                writer.add_scalar("val/pose_ADDS", current_adds_score, epoch)
 
             # Save Best Model (maximize ADD-S)
             if current_adds_score > best_adds_score:
