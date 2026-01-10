@@ -558,8 +558,8 @@ class SetCriterion(nn.Module):
         losses = {}
         losses["loss_translation"] = loss_translation.sum() / n_obj
         return losses
-    
-    def loss_rotation_gemini(self, outputs, targets, indices, num_boxes):
+    # geodesic distance loss for rotation matrix but symmetry aware
+    def loss_rotation_symmetry_aware(self, outputs, targets, indices, num_boxes):
         """
         Geodesic Loss (Safe Trace + Symmetry Handling)
         """
@@ -727,22 +727,9 @@ class SetCriterion(nn.Module):
         #loss_rot = F.l1_loss(R_pred.view(-1, 6), R_tgt.view(-1, 6), reduction='mean')
         losses["loss_rot"] = loss_rot / 6.0
         return losses
-    #### End My ADD-S and Rot loss. TODO: Check if it differs from the YOLOX6d implementation
-    ## YOLOX6D Keypoint loss (2D projection of 3D center)
-    def kpts_loss(self, 
-                  kpts_preds, 
-                  kpts_targets, 
-                  bbox_targets):
-        sigmas = torch.tensor([.26], device=kpts_preds.device) / 10.0
-        kpts_preds_x, kpts_targets_x = kpts_preds[:, 0:1], kpts_targets[:, 0:1]
-        kpts_preds_y, kpts_targets_y = kpts_preds[:, 1:2], kpts_targets[:, 1:2]
-        # OKS based loss
-        d = (kpts_preds_x - kpts_targets_x) ** 2 + (kpts_preds_y - kpts_targets_y) ** 2
-        bbox_scale = torch.prod(bbox_targets[:, -2:], dim=1, keepdim=True)  #scale derived from bbox gt
-        oks = torch.exp(-d / (bbox_scale * (4 * sigmas**2) + 1e-9))
-        lkpt = (1 - oks).mean(axis=1)
-        return lkpt
+    #### End My ADD-S and Rot loss.
 
+    ## YOLOX6D Keypoint loss (2D projection of 3D center)
     # TODO: Check if this is implemented correctly
     def loss_oks(self, outputs, targets, indices, num_boxes):
         
@@ -776,9 +763,10 @@ class SetCriterion(nn.Module):
         loss = total / num_boxes
 
         return {'loss_keypoint': loss}
+    
     # From: Review of monocular depth estimation methods
     # https://www.spiedigitallibrary.org/journals/journal-of-electronic-imaging/volume-34/issue-02/020901/Review-of-monocular-depth-estimation-methods/10.1117/1.JEI.34.2.020901.full#r81
-    def loss_ard(self, 
+    def loss_ard_trans_z(self, 
                 outputs, 
                 targets, 
                 indices,
@@ -816,7 +804,7 @@ class SetCriterion(nn.Module):
         loss_adds_z = (self.mae_loss(pred_trans_z, tgt_trans_z) * 1000.0 / tgt_diam).sum() / num_boxes
        
         return {'loss_trans_z': loss_adds_z}
-    
+    # Same as above but not normalized by diameter
     def loss_trans_z_yolo6d(self, 
                     outputs, 
                     targets, 
@@ -840,7 +828,6 @@ class SetCriterion(nn.Module):
         pred_trans_z = outputs['pred_translations'][idx][:,-1]  # (N, 1)
         tgt_trans_z = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)[:,-1] # (N, 1)
        
-
         loss_trans_z = F.mse_loss(pred_trans_z, tgt_trans_z, reduction='none') * 1000.0  # (N, 1)
         loss_trans_z = torch.sum(loss_trans_z)
         loss_trans_z = torch.sqrt(loss_trans_z + 1e-6)  # to avoid NaN
@@ -869,6 +856,7 @@ class SetCriterion(nn.Module):
             return {'loss_trans_z': loss_trans_z}
     
     # Translation in xy in uv coords.
+    # L1 Loss for 2D Keypoint (Object Center Projection)
     def loss_keypoint(self, 
                     outputs, 
                     targets, 
@@ -893,7 +881,8 @@ class SetCriterion(nn.Module):
         # Only consider x,y components (L1 loss)
         loss_trans = self.mae_loss(src_trans[:, :2], tgt_trans[:, :2]).sum() / num_boxes
         return {'loss_trans_xy': loss_trans}
-
+    
+    # Log-L1 Loss (Ablation Experiment)
     def loss_relative_log_l1(self, pred_z_meters, gt_z_meters):
         """
         Computes L1 loss in Log Space. 
@@ -993,7 +982,8 @@ class SetCriterion(nn.Module):
                 loss_adds = torch.hstack((loss_adds, adds_0p1))
         loss_adds = loss_adds.mean()
         return loss_adds
-    
+    ####################################################################################
+    # Put all pose losses together
     def loss_pose(self, 
               outputs, 
               targets, 
@@ -1029,15 +1019,17 @@ class SetCriterion(nn.Module):
         """
         if "relative_rotation" in targets[0]:     
             # Loss weights from paper (empirically tuned)
-            lambda_adds = 1.0 # Gemini says this should be less: # Start small! This loss can be large in magnitude. 0.1 
-            lambda_rot = 1.0
+            # Don't change this here unless you have a good reason!
+            # You can also do this via the loss coefficients in the main training script
+            lambda_adds = 1.0 
             lambda_kpt = 1.0
             lambda_trans_xy = 1.0
             lambda_trans_z = 1.0
+            lambda_rot = 1.0
 
             # Compute individual losses
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
-            loss_rot_dict = self.loss_rotation_gemini(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rotation_symmetry_aware(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
