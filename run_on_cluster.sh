@@ -1,21 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=test_training
-#SBATCH --gpus-per-node=2
-#SBATCH --export=NUM_GPU=2
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=128G
+#SBATCH --job-name=slurm_test
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=24
+#SBATCH --mem=64G
 #SBATCH --time=30-00:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
-
-DSNAME=lw_detr6d_data
-
-DATAPATH=/opt/cache/$USER
-OUTPATH=$DATAPATH/$DSNAME
-
-PATH_TO_BOP=$OUTPATH/bop_datasets
-PATH_TO_WEIGHTS=$OUTPATH/weights/lw-detr
-WORKSPACE=$PWD
+# Task options 'train' or 'eval'
+#SBATCH --export=TASK=train
+# Model options: tiny, small, medium, large, xlarge
+#SBATCH --export=MODEL=tiny
+#SBATCH --mail-user=julius.kuehn@igd.fraunhofer.de
+#SBATCH --mail-type=BEGIN,END,FAIL
 
 gio_mount_nas()
 {
@@ -25,26 +21,77 @@ gio_mount_nas()
     gio mount smb://pc3163/nobackup < ~/smbcreds
 }
 
+DSNAME=lw_detr6d_data
 
-if test ! -d $OUTPATH ; then
+DATAPATH=/opt/spool/$USER
+# Check if path exists (file or directory)
+if [ -e $DATAPATH ]; then
+    echo "Path $DATAPATH exists"
+else 
+    mkdir -p $DATAPATH
+fi
+
+DATA=$DATAPATH/$DSNAME
+
+PATH_TO_BOP=$DATA/bop_datasets
+PATH_TO_WEIGHTS=$DATA/weights/lw-detr
+WORKSPACE=$PWD
+
+# Download dataset if not present
+if test ! -d $DATA ; then
     gio_mount_nas
     gio copy --progress smb://pc3163/nobackup/cache/jkuehn/$DSNAME.zip $DATAPATH
     cd $DATAPATH
     unzip -q $DSNAME.zip 
 fi
 
+# Configure model
+if [ $MODEL == 'tiny' ]; then
+    echo "Using tiny model settings"
+    IDX='0'
+elif [ $MODEL == 'small' ]; then
+    echo "Using small model settings"
+    IDX='1'
+elif [ $MODEL == 'medium' ]; then
+    echo "Using base model settings"
+    IDX='2'
+elif [ $MODEL == 'large' ]; then
+    echo "Using base model settings"
+    IDX='3'
+elif [ $MODEL == 'xlarge' ]; then
+    echo "Using base model settings"
+    IDX='4'
+else
+    echo "Unknown model $MODEL, exiting"
+    exit 1
+fi
+MODEL="${IDX}_${MODEL}"
+
+# Configure task
+if [ $TASK == 'train' ]; then
+    echo "Train task selected"
+    IDX='0'
+elif [ $TASK == 'eval' ]; then
+    echo "Eval task selected"
+    IDX='1'
+else
+    echo "Unknown task $TASK, exiting"
+    exit 1
+fi
+TASK="${IDX}_${TASK}"
+
 IMAGE_NAME=lw-detr6d
 ## MAIN
+NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 rootless-docker run --gpus all --shm-size=256g \
     -v $WORKSPACE:/workspace/LWDETR\
     -v $PATH_TO_BOP:/workspace/LWDETR/data/datasets/bop \
     -v $PATH_TO_WEIGHTS:/workspace/LWDETR/data/weights \
     pc3163.igd.fraunhofer.de:4567/$IMAGE_NAME\
     bash -c "python /workspace/LWDETR/models/ops/setup.py build install && \
-                /workspace/LWDETR/scripts/pose/0_tiny/0_train.sh /workspace/LWDETR/data/datasets/bop $NUM_GPU"
+                /workspace/LWDETR/scripts/pose/$MODEL/$TASK.sh $NUM_GPUS $COEF_KPT $COEF_TRANS_XY $COEF_TRANS_Z $COEF_ROT $COEF_ADDS"
                                     
         
-
 ## OUTPUT
 # zip & copy the data back
 # cd $OUTPATH/../
