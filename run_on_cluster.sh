@@ -6,12 +6,22 @@
 #SBATCH --time=30-00:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
+#SBATCH --export=SLURM_OUT=not_called_from_exp
+#SBATCH --export=JOB_NAME=not_called_from_exp
 # Task options 'train' or 'eval'
 #SBATCH --export=TASK=train
 # Model options: tiny, small, medium, large, xlarge
 #SBATCH --export=MODEL=tiny
-#SBATCH --mail-user=julius.kuehn@igd.fraunhofer.de
-#SBATCH --mail-type=BEGIN,END,FAIL
+
+# Copy exp config that called this sh
+# Copy config for reproducability
+# Check if path exists (file or directory)
+if [ -e $SLURM_OUT ]; then
+    echo "Path $SLURM_OUT exists"
+else 
+    mkdir -p $SLURM_OUT
+fi
+cp "run_exps.sh" "$SLURM_OUT/${SLURM_JOB_ID}_${JOB_NAME}_config.sh" 
 
 gio_mount_nas()
 {
@@ -89,7 +99,7 @@ rootless-docker run --gpus all --shm-size=256g \
     -v $PATH_TO_WEIGHTS:/workspace/LWDETR/data/weights \
     pc3163.igd.fraunhofer.de:4567/$IMAGE_NAME\
     bash -c "python /workspace/LWDETR/models/ops/setup.py build install && \
-                /workspace/LWDETR/scripts/pose/$MODEL/$TASK.sh $NUM_GPUS $COEF_KPT $COEF_TRANS_XY $COEF_TRANS_Z $COEF_ROT $COEF_ADDS, $COEF_CLAS $COEF_BBOX $COEF_GIOU"
+                /workspace/LWDETR/scripts/pose/$MODEL/$TASK.sh $NUM_GPUS $COEF_KPT $COEF_TRANS_XY $COEF_TRANS_Z $COEF_ROT $COEF_ADDS $COEF_CLAS $COEF_BBOX $COEF_GIOU"
                                     
         
 ## OUTPUT

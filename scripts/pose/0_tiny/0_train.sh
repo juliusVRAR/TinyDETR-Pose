@@ -21,7 +21,6 @@ python -u -m torch.distributed.launch \
                             --lr_transformer 2e-5 \
                             --lr_encoder 1e-5 \
                             --lr_backbone 1e-6 \
-                            --batch_size 24 \
                             --weight_decay 1e-4 \
                             --epochs 100 \
                             --lr_drop 60 \
@@ -55,6 +54,7 @@ python -u -m torch.distributed.launch \
                             --tensorboard \
                             --pretrained_encoder /workspace/LWDETR/data/weights/caev2_tiny_S_300e_objects365.pth \
                             --pretrain_weights /workspace/LWDETR/data/weights/LWDETR_tiny_30e_objects365.pth \
+                            --batch_size 16 \
                             --matcher_type "6d" \
                             --keypoint_loss_coef $COEF_KPT \
                             --trans_z_loss_coef $COEF_TRANS_Z \
