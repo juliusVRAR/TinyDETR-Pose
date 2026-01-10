@@ -1,4 +1,6 @@
 #!/bin/bash
+# Notofication
+mail=julius.kuehn@igd.fraunhofer.de
 # run this with sh on an amperecontrol
 # Hardware 
 gpus=4
@@ -35,7 +37,7 @@ sbatch --job-name=$job_name \
         --output=$slurm_out/%j-%x.out \
         --error=$slurm_out/%j-%x.err \
         --export=COEF_ROT=$coef_rot,COEF_KPT=$coef_kpt,COEF_TRANS_XY=$coef_trans_xy,COEF_TRANS_Z=$coef_trans_z,COEF_ADDS=$coef_adds,COEF_CLAS=$coef_clas,COEF_BBOX=$coef_bbox,COEF_GIOU=$coef_giou,MODEL=$model,TASK=$task,SLURM_OUT=$slurm_out,JOB_NAME=$job_name \
-        --mail-user=julius.kuehn@igd.fraunhofer.de \
+        --mail-user=$mail \
         --mail-type=BEGIN,END,FAIL \
         run_on_cluster.sh
 
