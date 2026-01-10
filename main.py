@@ -398,11 +398,6 @@ def main(args):
                                  drop_last=False, collate_fn=utils.collate_fn, 
                                  num_workers=args.num_workers)
     
-    # data_loader_val_coco = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-    #                             drop_last=False, collate_fn=utils.collate_fn, 
-    #                             num_workers=args.num_workers)
-
-
     base_ds = get_coco_api_from_dataset(dataset_val)
 
    
