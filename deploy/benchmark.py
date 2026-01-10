@@ -352,7 +352,7 @@ def infer_onnx(sess, coco_evaluator, time_profile, prefix, img_list, device, rep
 def infer_engine(model, coco_evaluator, time_profile, prefix, img_list, device, repeats=1):
     time_list = []
     for img_dict in tqdm.tqdm(img_list):
-        image = load_image(os.path.join(prefix, img_dict['file_name']))
+        image = load_image(os.path.join(prefix, img_dict['image_folder'], 'rgb', img_dict['file_name']))
         width, height = image.size
         orig_target_sizes = torch.Tensor([height, width])
         image_tensor, _ = infer_transforms()(image, None)  # target is None
@@ -555,9 +555,9 @@ class TimeProfiler(contextlib.ContextDecorator):
 def main(args):
     print(args)
 
-    coco_gt = osp.join(args.coco_path, 'annotations/instances_val2017.json')
+    coco_gt = osp.join(args.coco_path, 'annotations/instances_test_bop.json')
     img_list = get_image_list(coco_gt)
-    prefix = osp.join(args.coco_path, 'val2017')
+    prefix = osp.join(args.coco_path, 'test')
     if args.run_benchmark:
         repeats = 10
         print('Inference for each image will be repeated 10 times to obtain '
@@ -585,3 +585,5 @@ def main(args):
 if __name__ == '__main__':
     args = parser_args()
     main(args)
+
+
