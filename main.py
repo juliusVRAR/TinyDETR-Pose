@@ -463,18 +463,18 @@ def main(args):
             model, criterion, postprocessors, data_loader_val, base_ds, device, args)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
-        if args.resume:
-            eval_epoch = checkpoint['epoch']
-        else:
-            eval_epoch = None
-        
+    if args.resume:
+        eval_epoch = checkpoint['epoch']
+    
+    if args.eval or args.pose_eval_only:
+        print("Pose Eval.")
         pose_evaluate(model=model, 
-                      matcher=matcher, 
-                      pose_evaluator=pose_evaluator,
-                      data_loader=data_loader_val, 
-                      image_set=args.eval_set, bbox_mode=args.bbox_mode,
-                      quick_mode=args.quick_eval, 
-                      device=device, output_dir=args.output_dir, epoch=eval_epoch)
+                    matcher=matcher, 
+                    pose_evaluator=pose_evaluator,
+                    data_loader=data_loader_val, 
+                    image_set=args.eval_set, bbox_mode=args.bbox_mode,
+                    quick_mode=args.quick_eval, 
+                    device=device, output_dir=args.output_dir, epoch=eval_epoch)
         return
     # Evaluate the model for the BOP challenge
     if args.eval_bop:
@@ -586,7 +586,7 @@ def main(args):
                 quick_mode=quick_mode,
                 device=device,
                 output_dir=args.output_dir,
-                epoch=eval_epoch,
+                epoch=epoch,
                 
             )
             print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
