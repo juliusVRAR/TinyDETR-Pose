@@ -2,11 +2,16 @@ model_name='lwdetr_tiny_ycbv'
 dataset_path=/workspace/LWDETR/data/datasets/bop
 NUM_GPU=$1
 # Loss balacing coefficients
+# Pose loss coefficients
 COEF_KPT=$2
 COEF_TRANS_XY=$3
 COEF_TRANS_Z=$4
 COEF_ROT=$5
 COEF_ADDS=$6
+# Detection loss coefficients
+COEF_CLAS=$7
+COEF_BBOX=$8
+COEF_GIOU=$9
 OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/kpt_$COEF_KPT\_txy_$COEF_TRANS_XY\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS              
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
@@ -56,5 +61,8 @@ python -u -m torch.distributed.launch \
                             --trans_xy_loss_coef $COEF_TRANS_XY \
                             --rot_loss_coef $COEF_ROT \
                             --adds_loss_coef $COEF_ADDS \
+                            --cls_loss_coef $COEF_CLAS \
+                            --bbox_loss_coef $COEF_BBOX \
+                            --giou_loss_coef $COEF_GIOU \
                             --n_mesh_points 1024 \
                             --output_dir $OUTPUT_DIR

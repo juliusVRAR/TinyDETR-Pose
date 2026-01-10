@@ -153,13 +153,14 @@ def get_args_parser():
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     parser.add_argument('--focal_alpha', default=0.25, type=float)
+    parser.add_argument('--reduce_det_loss_epochs', default=10000000, type=int, help='Number of epochs after which detection losses are reduced to half.')
     
     # * Loss coefficients
     # Pose Estimation losses
     parser.add_argument('--keypoint_loss_coef', default=10.0, type=float, help='Loss weighing parameter for the keypoints')
     parser.add_argument('--trans_z_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation z component')
     parser.add_argument('--trans_xy_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation')
-    parser.add_argument('--rot_loss_coef', default=5.0, type=float, help='Loss weighing parameter for the rotation')
+    parser.add_argument('--rot_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the rotation')
     parser.add_argument('--adds_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the ADD-S metric. Active after warmup epochs.')
     parser.add_argument('--warm_up_epochs', default=15, type=int, help='Number of epochs before ADD-S loss multiplier is activated.')
     # Loss

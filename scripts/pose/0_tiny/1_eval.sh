@@ -1,7 +1,8 @@
 model_name='lwdetr_tiny_ycbv'
-dataset_path=$1
-NUM_GPU=$2
-checkpoint=$3
+dataset_path='data/datasets/bop/ycbv'
+NUM_GPU=1
+checkpoint='data/weights/checkpoint0049_new.pth'
+
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
@@ -10,7 +11,8 @@ python -u -m torch.distributed.launch \
                 --resume $checkpoint \
                 --dataset_file ycbv \
                 --eval_set test \
-                --rotation_representation 6d \
+                --rotation_representation '6d' \
+                --models /models/  \
                 --eval_batches 0 \
                 --output_dir output \
                 --batch_size 16 \
@@ -28,7 +30,7 @@ python -u -m torch.distributed.launch \
                 --dec_n_points 2 \
                 --bbox_reparam \
                 --lite_refpoint_refine \
-                --num_queries 50 \
+                --num_queries 100 \
                 --num_select 100 \
                 --dataset_file ycbv \
                 --square_resize_div_64 \

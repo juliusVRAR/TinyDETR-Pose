@@ -630,7 +630,71 @@ class SetCriterion(nn.Module):
         return losses
     ###################PoET Losses#########################
     ############### Losses proposed in yolox6d ######################
-    #### My ADD-S and Rot loss. TODO: Check if it differs from the YOLOX6d implementation
+    #### My ADD-S and Rot loss.
+    def loss_adds_sym_only(self, outputs, targets, indices, num_boxes):
+        """
+        ADD / ADD-S loss (Raw Meter Distance).
+        """
+        pred_R = outputs['pred_rotations']     # (B, Q, 3, 3)
+        pred_t = outputs['pred_translations']  # (B, Q, 3)
+
+        # We will accumulate the SUM of distances and divide by num_boxes at the end
+        total_dist_sum = 0.0
+
+        for b, (pi, ti) in enumerate(indices):
+            if len(pi) == 0: continue
+
+            # 1. Fetch Data
+            # Note: We don't need 'diameter' anymore if we want raw meter loss
+            tgt = targets[b]
+            R_p, t_p = pred_R[b][pi], pred_t[b][pi]
+            
+            # Ensure targets are float32 to match preds
+            R_g = tgt['relative_rotation'][ti].float() # (M, 3, 3)
+            t_g = tgt['relative_position'][ti].float() # (M, 3)
+            pts = tgt['model_points'][ti].float() # (M, P, 3)
+            sym = tgt['is_symmetric'][ti].bool()  # (M,)
+
+            # 2. Transform Points (Batch Matrix Multiplication)
+            # Formula: (R @ points.T).T + t
+            # pred: (M, 3, 3) @ (M, 3, P) -> (M, 3, P) -> (M, P, 3)
+            pts_p = torch.bmm(R_p, pts.transpose(1, 2)).transpose(1, 2) + t_p.unsqueeze(1)
+            pts_g = torch.bmm(R_g, pts.transpose(1, 2)).transpose(1, 2) + t_g.unsqueeze(1)
+
+            if sym.any():
+                # 3. Calculate Distances
+                # Default: ADD (Non-Symmetric) - 1-to-1 distance
+                # Shape: (M, P, 3) -> (M, P) -> (M,)
+                diff = pts_p - pts_g
+                dists = diff.norm(dim=-1).mean(dim=-1)
+
+                # 4. Handle Symmetric Objects (ADD-S)
+                sym_idx = torch.where(sym)[0]
+                
+                # Extract symmetric subset
+                p_sym = pts_p[sym_idx] # (S, P, 3)
+                g_sym = pts_g[sym_idx] # (S, P, 3)
+
+                # Compute pairwise distance matrix (S, P, P)
+                # This finds the closest point on GT for every point on Pred
+                pairwise_dist = torch.cdist(p_sym, g_sym, p=2)
+                
+                # Min over GT points (dim 2), then Mean over Pred points (dim 1)
+                min_dists = pairwise_dist.min(dim=2).values.mean(dim=1)
+                
+                # Overwrite the standard ADD distances with ADD-S distances
+                dists[sym_idx] = min_dists
+
+            # 5. Sum up the error for this batch
+            total_dist_sum += dists.sum()
+
+        # 6. Normalize by total number of matched objects in the batch (DETR standard)
+        # Avoid division by zero
+        num_boxes = max(num_boxes, 1)
+        loss_adds = total_dist_sum / num_boxes
+
+        return {'loss_adds': loss_adds}
+
     def loss_adds(self, outputs, targets, indices, num_boxes):
         """
         ADD / ADD-S loss (Raw Meter Distance).
@@ -946,7 +1010,7 @@ class SetCriterion(nn.Module):
     ####################################################################################
     
     #####T6D Direct: Symmetric Aware loss for rotation | translation uses the same as PoET ########################
-    def loss_rotation_sym_aware(self, outputs, targets, indices, num_boxes):
+    def loss_rotation_sym_aware_T6D(self, outputs, targets, indices, num_boxes):
         """
         Compute symmetry-aware rotation loss as per equation (8).
         

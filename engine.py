@@ -84,10 +84,20 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         # Update the weight in the criterion's dictionary BEFORE summing
         if epoch < args.warm_up_epochs:
-            criterion.weight_dict['loss_adds'] = 0.0
+            # Add adds loss with small weight during the initial training phase. So we learn something about symmetric objects early on.
+            criterion.weight_dict['loss_adds'] = 0.1
+            criterion.weight_dict['loss_trans_xy'] = 1.0
         else:
             criterion.weight_dict['loss_adds'] = args.adds_loss_coef
-
+            # Disable metric XY consistency to let Z converge first. 
+            criterion.weight_dict['loss_trans_xy'] = args.trans_xy_loss_coef
+        # TODO: Reduce detection loss coeffs in later training stages.
+        # Currently set to a very high epoch number to disable this.
+        if epoch >= args.reduce_det_loss_epochs:
+            criterion.weight_dict['loss_ce'] = args.cls_loss_coef * 0.5
+            criterion.weight_dict['loss_bbox'] = args.bbox_loss_coef * 0.5
+            criterion.weight_dict['loss_giou'] = args.giou_loss_coef * 0.5
+        
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)

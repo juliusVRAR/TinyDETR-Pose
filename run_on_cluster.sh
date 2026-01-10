@@ -89,7 +89,7 @@ rootless-docker run --gpus all --shm-size=256g \
     -v $PATH_TO_WEIGHTS:/workspace/LWDETR/data/weights \
     pc3163.igd.fraunhofer.de:4567/$IMAGE_NAME\
     bash -c "python /workspace/LWDETR/models/ops/setup.py build install && \
-                /workspace/LWDETR/scripts/pose/$MODEL/$TASK.sh $NUM_GPUS $COEF_KPT $COEF_TRANS_XY $COEF_TRANS_Z $COEF_ROT $COEF_ADDS"
+                /workspace/LWDETR/scripts/pose/$MODEL/$TASK.sh $NUM_GPUS $COEF_KPT $COEF_TRANS_XY $COEF_TRANS_Z $COEF_ROT $COEF_ADDS, $COEF_CLAS $COEF_BBOX $COEF_GIOU"
                                     
         
 ## OUTPUT
