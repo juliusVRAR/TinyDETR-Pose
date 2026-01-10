@@ -341,38 +341,38 @@ def main(args):
     param_dicts = get_param_dict(args, model_without_ddp)
 
     # TODO: Check if the other one is needed
-    # optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, 
-    #                               weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, 
+                                  weight_decay=args.weight_decay)
     
     
-    # Separate the parameters
-    backbone_params = []
-    transformer_params = []
-    new_head_params = []
+    # # Separate the parameters
+    # backbone_params = []
+    # transformer_params = []
+    # new_head_params = []
 
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
+    # for name, param in model.named_parameters():
+    #     if not param.requires_grad:
+    #         continue
             
-        if "backbone" in name:
-            # The Pretrained ViT
-            backbone_params.append(param)
-        elif "transformer" in name:
-            # The Pretrained Transformer Decoder
-            transformer_params.append(param)
-        else:
-            # Your New Heads (Class, Box, Z, XY, Rot)
-            new_head_params.append(param)
+    #     if "backbone" in name:
+    #         # The Pretrained ViT
+    #         backbone_params.append(param)
+    #     elif "transformer" in name:
+    #         # The Pretrained Transformer Decoder
+    #         transformer_params.append(param)
+    #     else:
+    #         # Your New Heads (Class, Box, Z, XY, Rot)
+    #         new_head_params.append(param)
 
-    # Define the Optimizer
-    optimizer = torch.optim.AdamW([
-        # Backbone: VERY Slow (Preserve Objects365 knowledge from CAEv2)
-        {'params': backbone_params, 'lr': args.lr_encoder}, 
-        # Transformer: Slow
-        {'params': transformer_params, 'lr': args.lr_transformer},
-        # New Heads: Fast (They are learning from scratch!)
-        {'params': new_head_params, 'lr': args.lr} 
-        ], weight_decay=args.weight_decay)
+    # # Define the Optimizer
+    # optimizer = torch.optim.AdamW([
+    #     # Backbone: VERY Slow (Preserve Objects365 knowledge from CAEv2)
+    #     {'params': backbone_params, 'lr': args.lr_encoder}, 
+    #     # Transformer: Slow
+    #     {'params': transformer_params, 'lr': args.lr_transformer},
+    #     # New Heads: Fast (They are learning from scratch!)
+    #     {'params': new_head_params, 'lr': args.lr} 
+    #     ], weight_decay=args.weight_decay)
     
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
     
