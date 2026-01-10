@@ -28,3 +28,4 @@ output/*
 *.jpg
 *.jpeg
 *.png
+slurm_*
