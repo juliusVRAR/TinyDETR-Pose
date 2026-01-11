@@ -9,6 +9,7 @@ ram=500G
 # Model config 
 model='tiny'
 task='train'
+job_name="${task}_${model}_r_${coef_rot}_test"
 # Slurm reports land here
 slurm_out="$HOME/lw-detr6d/slurm_${task}_${model}"
 # Detection Loss config
@@ -29,7 +30,6 @@ else
     mkdir -p $slurm_out
 fi
 
-job_name="${task}_${model}_r_${coef_rot}_test"
 sbatch --job-name=$job_name \
         --gpus-per-node=$gpus \
         --cpus-per-task=$cpus \
