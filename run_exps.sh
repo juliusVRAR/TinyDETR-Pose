@@ -3,9 +3,9 @@
 mail=julius.kuehn@igd.fraunhofer.de
 # run this with sh on an amperecontrol
 # Hardware 
-gpus=7
-cpus=200
-ram=750G
+gpus=4
+cpus=120
+ram=500G
 # Model config 
 model='tiny'
 task='train'
@@ -29,7 +29,7 @@ else
     mkdir -p $slurm_out
 fi
 
-job_name="${task}_${model}_r_${coef_rot}"
+job_name="${task}_${model}_r_${coef_rot}_test"
 sbatch --job-name=$job_name \
         --gpus-per-node=$gpus \
         --cpus-per-task=$cpus \
@@ -38,7 +38,7 @@ sbatch --job-name=$job_name \
         --error=$slurm_out/%j-%x.err \
         --export=COEF_ROT=$coef_rot,COEF_KPT=$coef_kpt,COEF_TRANS_XY=$coef_trans_xy,COEF_TRANS_Z=$coef_trans_z,COEF_ADDS=$coef_adds,COEF_CLAS=$coef_clas,COEF_BBOX=$coef_bbox,COEF_GIOU=$coef_giou,MODEL=$model,TASK=$task,SLURM_OUT=$slurm_out,JOB_NAME=$job_name \
         --mail-user=$mail \
-        --mail-type=BEGIN,END,FAIL \
+        --mail-type=BEGIN,END,FAIL\
         run_on_cluster.sh
 
 ###################################

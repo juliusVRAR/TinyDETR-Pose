@@ -13,15 +13,11 @@
 # Model options: tiny, small, medium, large, xlarge
 #SBATCH --export=MODEL=tiny
 
-# Copy exp config that called this sh
+
 # Copy config for reproducability
-# Check if path exists (file or directory)
-if [ -e $SLURM_OUT ]; then
-    echo "Path $SLURM_OUT exists"
-else 
-    mkdir -p $SLURM_OUT
-fi
-cp "run_exps.sh" "$SLURM_OUT/${SLURM_JOB_ID}_${JOB_NAME}_config.sh" 
+REPORT_OUT="${SLURM_OUT}/${SLURM_JOB_ID}"
+mkdir -p $REPORT_OUT
+
 
 gio_mount_nas()
 {
@@ -89,6 +85,11 @@ else
     exit 1
 fi
 TASK="${IDX}_${TASK}"
+
+# Copy exp and train config for reproducability
+cp "run_exps.sh" "$REPORT_OUT/${SLURM_JOB_ID}_${JOB_NAME}_exp.sh" 
+cp "scripts/pose/${MODEL}/${TASK}.sh" "$REPORT_OUT/${SLURM_JOB_ID}_${JOB_NAME}_config.sh" 
+
 
 IMAGE_NAME=lw-detr6d
 ## MAIN
