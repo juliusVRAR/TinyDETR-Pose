@@ -569,8 +569,10 @@ def main(args):
 
         if run_pose_eval:
             # Last epoch: force full evaluation (ignore quick_eval flag)
-            is_last_epoch = (epoch + 1) == args.epochs
-            quick_mode = is_last_epoch
+            if (epoch + 1) == args.epochs:
+                quick_mode = False
+            else
+                quick_mode = True
             # ADD, ADD-S, ADD(-S)
             current_add_score, current_adi_score, current_adds_score = pose_evaluate(
                 model=model,
