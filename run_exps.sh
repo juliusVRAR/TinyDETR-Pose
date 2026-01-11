@@ -1,11 +1,11 @@
 #!/bin/bash
-# Notofication
+# Notification
 mail=julius.kuehn@igd.fraunhofer.de
 # run this with sh on an amperecontrol
 # Hardware 
-gpus=4
-cpus=125
-ram=400G
+gpus=7
+cpus=200
+ram=750G
 # Model config 
 model='tiny'
 task='train'
