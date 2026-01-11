@@ -200,7 +200,7 @@ def get_args_parser():
     # output and logging
     parser.add_argument('--output_dir', default='output',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--checkpoint_interval', default=1, type=int,
+    parser.add_argument('--checkpoint_interval', default=10, type=int,
                         help='epoch interval to save checkpoint')
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--resume', default='', type=str, 
