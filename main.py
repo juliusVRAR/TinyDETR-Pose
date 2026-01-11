@@ -567,7 +567,7 @@ def main(args):
             and should_run_pose_eval(epoch, args.epochs, args.warm_up_epochs)
         )
 
-        if run_pose_eval:
+        if run_pose_eval and utils.is_main_process():
             # Last epoch: force full evaluation (ignore quick_eval flag)
             if (epoch + 1) == args.epochs:
                 quick_mode = False
