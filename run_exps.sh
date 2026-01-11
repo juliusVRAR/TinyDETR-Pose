@@ -3,13 +3,12 @@
 mail=julius.kuehn@igd.fraunhofer.de
 # run this with sh on an amperecontrol
 # Hardware 
-gpus=4
-cpus=120
-ram=500G
+gpus=1
+cpus=64
+ram=64G
 # Model config 
 model='tiny'
 task='train'
-job_name="${task}_${model}_r_${coef_rot}_test"
 # Slurm reports land here
 slurm_out="$HOME/lw-detr6d/slurm_${task}_${model}"
 # Detection Loss config
@@ -22,7 +21,8 @@ coef_trans_xy=20.0
 coef_trans_z=2.0 
 coef_adds=15.0
 coef_rot=2.0
-
+#TODO: Derive jobname from config.
+job_name="${task}_${model}_r_${coef_rot}_test"
 # Check if path exists (file or directory)
 if [ -e $slurm_out ]; then
     echo "Path $slurm_out exists"
