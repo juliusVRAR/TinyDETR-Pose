@@ -329,7 +329,7 @@ def pose_evaluate(model,
     print("Start results evaluation")
     start_time = time.time()
     print("Start Calculating ADD")
-    results_add = pose_evaluator.evaluate_pose_adds(output_eval_dir)
+    results_add = pose_evaluator.evaluate_pose_add(output_eval_dir)
 
     print("Start Calculating ADD-S")
     results_adi= pose_evaluator.evaluate_pose_adi(output_eval_dir)
