@@ -319,7 +319,10 @@ class LWDETR6D(nn.Module):
         output_z_log_var = z_out[..., 1]
         pred_tz = output_norm_z * self.max_depth # Pred z in meters
         #The backprojection has to happen on to the padded img not on the orginal size
-        img_h, img_w = samples.tensors.shape[-2:]
+        valid_h = (~samples.mask[0]).any(dim=1).sum()
+        valid_w = (~samples.mask[0]).any(dim=0).sum()
+        img_h, img_w = int(valid_h), int(valid_w)
+        
         u = output_uv_norm[..., 0:1] * img_w
         v = output_uv_norm[..., 1:2] * img_h
         
@@ -929,7 +932,7 @@ class SetCriterion(nn.Module):
         # Get the predicted Normalized UV for matched queries
         src_norm_uv = outputs['pred_uv_norm'][idx]
         tgt_norm_uv = torch.cat([t['object_center_2d'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        loss_kpt = self.mae_loss(src_norm_uv, tgt_norm_uv).sum() / num_boxes
+        loss_kpt = F.smooth_l1_loss(src_norm_uv, tgt_norm_uv, reduction='sum') / num_boxes
         return {'loss_keypoint': loss_kpt}
 
     # L1 Loss for translation in x,y in meters
@@ -1121,7 +1124,7 @@ class SetCriterion(nn.Module):
 
             # Compute individual losses
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
-            loss_rot_dict = self.loss_rotation_symmetry_aware(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
