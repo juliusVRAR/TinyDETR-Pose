@@ -159,7 +159,8 @@ def main():
                         K=k_mat.cpu().numpy(),
                         show_mesh=args.show_mesh,
                         sample_points=args.mesh_points,
-                    )
+                        conf_threshold=args.score_threshold,
+                        scores=[d["score"] for d in dets])
 
                 out_file = output_dir / f"{args.split}_{int(tgt['image_id'])}.png"
                 cv2.imwrite(str(out_file), img_bgr)

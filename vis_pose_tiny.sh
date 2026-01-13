@@ -1,5 +1,5 @@
 python visualize_pose_predictions.py \
-  --checkpoint /workspace/LWDETR/data/weights/checkpoint0046_new.pth \
+  --checkpoint /workspace/LWDETR/data/weights/checkpoint.pth \
   --split test \
   --dataset_path /workspace/LWDETR/data/datasets/bop/ycbv \
   --dataset_file ycbv \
@@ -15,7 +15,7 @@ python visualize_pose_predictions.py \
   --ia_bce_loss --cls_loss_coef 1 --num_select 100 \
   --square_resize_div_64 --use_ema \
   --pretrained_encoder /workspace/LWDETR/data/weights/caev2_tiny_S_300e_objects365.pth \
-  --matcher_type 6d --keypoint_loss_coef 10.0 \
+  --matcher_type 6d --keypoint_loss_coef 1.0 \
   --trans_z_loss_coef 1.0 --trans_xy_loss_coef 1.0 \
   --rot_loss_coef 1.0 --adds_loss_coef 1.0 \
   --num_images 16 --score_threshold 0.4 --vis_output output/vis_test
