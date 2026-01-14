@@ -12,7 +12,7 @@ COEF_ADDS=$6
 COEF_CLAS=$7
 COEF_BBOX=$8
 COEF_GIOU=$9
-OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/kpt_$COEF_KPT\_txy_$COEF_TRANS_XY\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS\_skip_pose_eval              
+OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/kpt_$COEF_KPT\_txy_$COEF_TRANS_XY\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS            
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
@@ -51,11 +51,12 @@ python -u -m torch.distributed.launch \
                             --dataset_path $dataset_path \
                             --pretrained_encoder /workspace/LWDETR/data/weights/caev2_tiny_S_300e_objects365.pth \
                             --pretrain_weights /workspace/LWDETR/data/weights/LWDETR_tiny_30e_objects365.pth \
-                            --epochs 100 \
+                            --epochs 50 \
                             --num_select 100 \
                             --num_queries 50 \
                             --matcher_type "6d" \
                             --batch_size 16 \
+                            --n_mesh_points 1024 \
                             --keypoint_loss_coef $COEF_KPT \
                             --trans_z_loss_coef $COEF_TRANS_Z \
                             --trans_xy_loss_coef $COEF_TRANS_XY \
@@ -64,6 +65,7 @@ python -u -m torch.distributed.launch \
                             --cls_loss_coef $COEF_CLAS \
                             --bbox_loss_coef $COEF_BBOX \
                             --giou_loss_coef $COEF_GIOU \
-                            --n_mesh_points 1024 \
                             --output_dir $OUTPUT_DIR \
+                            --warm_up_epochs 0
+                             
                             
