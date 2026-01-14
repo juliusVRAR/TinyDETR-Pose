@@ -337,13 +337,28 @@ def pose_evaluate(model,
     print("Start Calculating ADD(-S)")
     results_adds = pose_evaluator.evaluate_pose_adds(output_eval_dir)
     print("Start Calculating Average Translation Error")
-    pose_evaluator.calculate_class_avg_translation_error(output_eval_dir)
+    results_avg_translation_error = pose_evaluator.calculate_class_avg_translation_error(output_eval_dir)
     print("Start Calculating Average Rotation Error")
-    pose_evaluator.calculate_class_avg_rotation_error(output_eval_dir)
+    results_avg_rotation_error = pose_evaluator.calculate_class_avg_rotation_error(output_eval_dir)
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Evaluation time: {}".format(total_time_str))
-    return results_add, results_adi, results_adds # ADD, ADD-S, ADD(-S)
+    print("Evaluation Results:")
+    print(f"ADD (add): {results_add}")
+    print(f"ADD-S (adi): {results_adi}")
+    print(f"ADD(-S) (adds): {results_adds}")
+    print(f"Average Translation Error: {results_avg_translation_error}")
+    print(f"Average Rotation Error: {results_avg_rotation_error}")
+    
+    log_file = open(output_eval_dir + "results_overview.log", 'w')
+    log_file.write("Evaluation Results:\n")
+    log_file.write(f"ADD (add): {results_add}\n")
+    log_file.write(f"ADD-S (adi): {results_adi}\n")
+    log_file.write(f"ADD(-S) (adds): {results_adds}\n")
+    log_file.write(f"Average Translation Error: {results_avg_translation_error}\n")
+    log_file.write(f"Average Rotation Error: {results_avg_rotation_error}\n")
+    log_file.close()
+    return results_add, results_adi, results_adds, results_avg_translation_error, results_avg_rotation_error # ADD, ADD-S, ADD(-S), Avg Translation Error, Avg Rotation Error
 
 @torch.no_grad()
 def bop_evaluate(model, matcher, data_loader, image_set, bbox_mode, rotation_mode, device, output_dir):

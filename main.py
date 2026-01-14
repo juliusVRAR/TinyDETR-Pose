@@ -574,7 +574,7 @@ def main(args):
             else:
                 quick_mode = True
             # ADD, ADD-S, ADD(-S)
-            current_add_score, current_adi_score, current_adds_score = pose_evaluate(
+            current_add_score, current_adi_score, current_adds_score, current_avg_translation_error, current_avg_rotation_error = pose_evaluate(
                 model=model,
                 matcher=matcher,
                 pose_evaluator=pose_evaluator,
@@ -594,7 +594,9 @@ def main(args):
                 writer.add_scalar("val/pose_ADD", current_add_score, epoch)
                 writer.add_scalar("val/pose_ADI", current_adi_score, epoch)
                 writer.add_scalar("val/pose_ADDS", current_adds_score, epoch)
-
+                writer.add_scalar("val/pose_avg_translation_error", current_avg_translation_error, epoch)
+                writer.add_scalar("val/pose_avg_rotation_error", current_avg_rotation_error, epoch)
+            
             # Save Best Model (maximize ADD-S)
             if current_adds_score > best_adds_score:
                 best_adds_score = current_adds_score
