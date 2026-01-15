@@ -12,7 +12,8 @@ COEF_ADDS=$6
 COEF_CLAS=$7
 COEF_BBOX=$8
 COEF_GIOU=$9
-OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/kpt_$COEF_KPT\_txy_$COEF_TRANS_XY\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS            
+SLURM_JOB_ID=$10
+OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$SLURM_JOB_ID\_kpt_$COEF_KPT\_txy_$COEF_TRANS_XY\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS            
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
