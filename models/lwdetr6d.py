@@ -217,7 +217,7 @@ class LWDETR6D(nn.Module):
         # bias_value = -math.log((1 - prior_prob) / prior_prob)
         # nn.init.constant_(self.class_head.bias, bias_value)
         # OR simply: 
-        nn.init.constant_(self.class_head.bias, -4.6)
+        nn.init.constant_(self.class_embed.bias, -4.6)
         
         print(f">> Class Head initialized with bias -4.6 (Prob 0.01)")
         print(">> Pose Heads Initialized: Z-Uncertainty set high, XY centered.")
