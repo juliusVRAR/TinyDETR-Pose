@@ -334,7 +334,7 @@ def main(args):
     if args.distributed:
         if args.sync_bn:
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
     
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
