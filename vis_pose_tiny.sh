@@ -1,5 +1,5 @@
 python visualize_pose_predictions.py \
-  --checkpoint /workspace/LWDETR/data/weights/checkpoint.pth \
+  --checkpoint /workspace/LWDETR/data/weights/checkpoint0029_new.pth \
   --split test \
   --dataset_path /workspace/LWDETR/data/datasets/bop/ycbv \
   --dataset_file ycbv \
@@ -14,8 +14,10 @@ python visualize_pose_predictions.py \
   --bbox_reparam --lite_refpoint_refine --num_queries 100 \
   --ia_bce_loss --cls_loss_coef 1 --num_select 100 \
   --square_resize_div_64 --use_ema \
+  --pretrain_keys_modify_to_load transformer.enc_out_class_embed.0.weight transformer.enc_out_class_embed.1.weight transformer.enc_out_class_embed.2.weight transformer.enc_out_class_embed.3.weight transformer.enc_out_class_embed.4.weight transformer.enc_out_class_embed.5.weight transformer.enc_out_class_embed.6.weight transformer.enc_out_class_embed.7.weight transformer.enc_out_class_embed.8.weight transformer.enc_out_class_embed.9.weight transformer.enc_out_class_embed.10.weight transformer.enc_out_class_embed.11.weight transformer.enc_out_class_embed.12.weight transformer.enc_out_class_embed.0.bias transformer.enc_out_class_embed.1.bias transformer.enc_out_class_embed.2.bias transformer.enc_out_class_embed.3.bias transformer.enc_out_class_embed.4.bias transformer.enc_out_class_embed.5.bias transformer.enc_out_class_embed.6.bias transformer.enc_out_class_embed.7.bias transformer.enc_out_class_embed.8.bias transformer.enc_out_class_embed.9.bias transformer.enc_out_class_embed.10.bias transformer.enc_out_class_embed.11.bias transformer.enc_out_class_embed.12.bias class_embed.weight class_embed.bias \
+  --grayscale \
   --pretrained_encoder /workspace/LWDETR/data/weights/caev2_tiny_S_300e_objects365.pth \
-  --matcher_type 6d --keypoint_loss_coef 1.0 \
+  --matcher_type hungarian --keypoint_loss_coef 1.0 \
   --trans_z_loss_coef 1.0 --trans_xy_loss_coef 1.0 \
   --rot_loss_coef 1.0 --adds_loss_coef 1.0 \
   --num_images 16 --score_threshold 0.4 --vis_output output/vis_test

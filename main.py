@@ -203,7 +203,7 @@ def get_args_parser():
     parser.add_argument('--checkpoint_interval', default=10, type=int,
                         help='epoch interval to save checkpoint')
     parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument('--resume', default='', type=str, 
+    parser.add_argument('--resume', default=None, type=str, 
                         help='resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
@@ -569,10 +569,11 @@ def main(args):
 
         if run_pose_eval and utils.is_main_process():
             # Last epoch: force full evaluation (ignore quick_eval flag)
-            if (epoch + 1) == args.epochs:
-                quick_mode = False
-            else:
-                quick_mode = True
+            # if (epoch + 1) == args.epochs:
+            #     quick_mode = False
+            # else:
+            #     quick_mode = True
+            quick_mode = False
             # ADD, ADD-S, ADD(-S)
             current_add_score, current_adi_score, current_adds_score, current_avg_translation_error, current_avg_rotation_error = pose_evaluate(
                 model=model,

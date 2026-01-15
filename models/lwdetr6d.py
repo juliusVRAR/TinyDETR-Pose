@@ -419,7 +419,7 @@ class LWDETR6D(nn.Module):
             kpt_enc = torch.cat(kpt_enc_list, dim=1)          # (B, total_queries, 2)
             
             rot_c1 = F.normalize(rot_enc[..., :3], dim=-1) 
-            rot_c2 = F.normalize(rot_enc[..., 3:] - torch.sum(rot_c1 * rot_enc[..., :3], dim=-1, keepdim=True) * rot_c1, dim=-1) 
+            rot_c2 = F.normalize(rot_enc[..., 3:] - torch.sum(rot_c1 * rot_enc[..., 3:], dim=-1, keepdim=True) * rot_c1, dim=-1) 
             rot_enc_full = torch.cat([rot_c1, rot_c2], dim=-1)          # (B, total_queries, 6)
             rot_enc_full = self.process_rotation(rot_enc_full) # (B, total_queries, 3, 3)
             out['enc_outputs'] = {
@@ -1532,6 +1532,7 @@ def load_pretrained_weights(model, ckpt_path):
 
     # Update the current model
     model_dict.update(pretrained_dict_filtered)
+    model.load_state_dict(model_dict)
 
 def build(args):
     # the `num_classes` naming here is somewhat misleading.
