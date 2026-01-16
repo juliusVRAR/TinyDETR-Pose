@@ -1,6 +1,19 @@
-model_name='lwdetr_xlarge_ycbv'
-dataset_path=$1
-NUM_GPU=$2
+model_name='lwdetr_xl_ycbv'
+dataset_path=/workspace/LWDETR/data/datasets/bop
+NUM_GPU=$1
+# Loss balacing coefficients
+# Pose loss coefficients
+COEF_KPT=$2
+COEF_TRANS_XY=$3
+COEF_TRANS_Z=$4
+COEF_ROT=$5
+COEF_ADDS=$6
+# Detection loss coefficients
+COEF_CLAS=$7
+COEF_BBOX=$8
+COEF_GIOU=$9
+SLURM_JOB_ID=$10
+OUTPUT_DIR=/workspace/LWDETR/output/pose/0_xl/$SLURM_JOB_ID\_kpt_$COEF_KPT\_txy_$COEF_TRANS_XY\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS   
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
@@ -9,9 +22,7 @@ python -u -m torch.distributed.launch \
                             --lr_transformer 2e-5 \
                             --lr_encoder 1e-5 \
                             --lr_backbone 1e-6 \
-                            --batch_size 64 \
                             --weight_decay 1e-4 \
-                            --epochs 300 \
                             --lr_drop 60 \
                             --lr_vit_layer_decay 0.75 \
                             --lr_component_decay 0.5 \
@@ -30,10 +41,8 @@ python -u -m torch.distributed.launch \
                             --dec_n_points 4 \
                             --bbox_reparam \
                             --lite_refpoint_refine \
-                            --num_queries 50 \
                             --ia_bce_loss \
                             --cls_loss_coef 1 \
-                            --num_select 300 \
                             --dataset_file ycbv \
                             --dataset_path $dataset_path \
                             --square_resize_div_64 \
@@ -44,4 +53,18 @@ python -u -m torch.distributed.launch \
                             --tensorboard \
                             --pretrained_encoder /workspace/LWDETR/data/weights/caev2_base_300e_objects365.pth \
                             --pretrain_weights /workspace/LWDETR/data/weights/LWDETR_xlarge_30e_objects365.pth \
-                            --matcher_type "6d"
+                            --epochs 50 \
+                            --num_select 300 \
+                            --num_queries 50 \
+                            --matcher_type "6d" \
+                            --batch_size 16 \
+                            --keypoint_loss_coef $COEF_KPT \
+                            --trans_z_loss_coef $COEF_TRANS_Z \
+                            --trans_xy_loss_coef $COEF_TRANS_XY \
+                            --rot_loss_coef $COEF_ROT \
+                            --adds_loss_coef $COEF_ADDS \
+                            --cls_loss_coef $COEF_CLAS \
+                            --bbox_loss_coef $COEF_BBOX \
+                            --giou_loss_coef $COEF_GIOU \
+                            --output_dir $OUTPUT_DIR \
+                            --warm_up_epochs 0
