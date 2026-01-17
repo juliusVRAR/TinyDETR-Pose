@@ -565,7 +565,7 @@ class PoseEvaluator(object):
         }
         json.dump(avg_translation_errors, json_file)
         json_file.close()
-        return avg_translation_errors["mean"]
+        return avg_translation_errors["mean"][0]
 
     def calculate_class_avg_rotation_error(self, output_path):
         """
@@ -628,7 +628,7 @@ class PoseEvaluator(object):
 
         json.dump(avg_rotation_errors, json_file)
         json_file.close()
-        return avg_rotation_errors["mean"]
+        return avg_rotation_errors["mean"][0]
 
     def se3_mul(self, RT1, RT2):
         """
