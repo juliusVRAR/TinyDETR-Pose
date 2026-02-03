@@ -1124,7 +1124,8 @@ class SetCriterion(nn.Module):
 
             # Compute individual losses
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
-            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)

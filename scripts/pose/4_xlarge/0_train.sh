@@ -53,11 +53,11 @@ python -u -m torch.distributed.launch \
                             --tensorboard \
                             --pretrained_encoder /workspace/LWDETR/data/weights/caev2_base_300e_objects365.pth \
                             --pretrain_weights /workspace/LWDETR/data/weights/LWDETR_xlarge_30e_objects365.pth \
-                            --epochs 50 \
+                            --epochs 32 \
                             --num_select 300 \
                             --num_queries 50 \
                             --matcher_type "6d" \
-                            --batch_size 16 \
+                            --batch_size 4 \
                             --keypoint_loss_coef $COEF_KPT \
                             --trans_z_loss_coef $COEF_TRANS_Z \
                             --trans_xy_loss_coef $COEF_TRANS_XY \
