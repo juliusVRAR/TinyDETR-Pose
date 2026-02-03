@@ -166,18 +166,18 @@ class Transformer(nn.Module):
             self.enc_output_norm = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(group_detr)])
         
         #################6D Heads########################
-        self.rotation_mode = rotation_mode
-        # Determine Translation and Rotation head output dimension
-        self.t_dim = 3 #xyz
-        self.xy_dim = 2 # xy
-        self.z_dim = 2 # z
-        # Alternative use the YOLOX6D approach they split translation into 2D center (xy) + depth (z)
-        if self.rotation_mode == '6d':
-            self.rot_dim = 6 # GramSchmidt
-        elif self.rotation_mode in ['quat', 'silho_quat']:
-            self.rot_dim = 4
-        else:
-            raise NotImplementedError('Rotational representation is not supported.')
+        # self.rotation_mode = rotation_mode
+        # # Determine Translation and Rotation head output dimension
+        # self.t_dim = 3 #xyz
+        # self.xy_dim = 2 # xy
+        # self.z_dim = 2 # z
+        # # Alternative use the YOLOX6D approach they split translation into 2D center (xy) + depth (z)
+        # if self.rotation_mode == '6d':
+        #     self.rot_dim = 6 # GramSchmidt
+        # elif self.rotation_mode in ['quat', 'silho_quat']:
+        #     self.rot_dim = 4
+        # else:
+        #     raise NotImplementedError('Rotational representation is not supported.')
 
         # self.dec_rot_head  = nn.ModuleList([MLP(input_dim=d_model, 
         #                                         hidden_dim=d_model, 
