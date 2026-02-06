@@ -20,6 +20,8 @@ import copy
 import math
 
 from typing import Callable
+from numpy import indices
+from matplotlib.pylab import indices
 from pyparsing import Path
 import torch
 import torch.nn.functional as F
@@ -294,6 +296,7 @@ class LWDETR6D(nn.Module):
             rot_c1 = F.normalize(pred_rots[:, :, :, :3], dim=3) 
             rot_c2 = F.normalize(pred_rots[:, :, :, 3:] - torch.sum(rot_c1 * pred_rots[:, :, :, 3:], dim=3, keepdim=True) * rot_c1, dim=3) 
         else:
+            # TODO: This can lead to NaNs if the norm is zero, need to be careful. 
             rot_c1 = (pred_rots[:, :, :, :3] / pred_rots[:, :, :, :3].norm(p=2, dim=3, keepdim=True))
             # Old version:
             # rot_c2 =  pred_rots[:, :, :, 3:] - torch.sum(rot_c1 * pred_rots[:, :, :, 3:], dim=2, keepdim=True) * rot_c1
@@ -368,8 +371,8 @@ class LWDETR6D(nn.Module):
                                                     output_rots, 
                                                     output_trans,
                                                     output_uv_norm,
-                                                    output_norm_z,
-                                                    output_z_log_var
+                                                    output_z_log_var,
+                                                    output_norm_z
                                                     )
 
         if self.two_stage:
@@ -624,12 +627,22 @@ class SetCriterion(nn.Module):
         src_rot = outputs["pred_rotations"][idx]
         tgt_rot = torch.cat([t['relative_rotation'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
+        # Get symmetry flags
+        is_sym = torch.cat([t['is_symmetric'][i] for t, (_, i) in zip(targets, indices)], dim=0).bool()
+
         product = torch.bmm(src_rot, tgt_rot.transpose(1, 2))
         trace = torch.sum(product[:, torch.eye(3).bool()], 1)
         theta = torch.clamp(0.5 * (trace - 1), -1 + eps, 1 - eps)
         rad = torch.acos(theta)
+        ####### Test #######
+        # Sym aware
+        # Zero out rotation loss for symmetric objects
+        # Rely purely on ADD-S for those
+        loss = torch.where(is_sym, torch.zeros_like(rad), rad)
+
+
         losses = {}
-        losses["loss_rot"] = rad.sum() / num_boxes
+        losses["loss_rot"] = loss.sum() / num_boxes
         return losses
     ###################PoET Losses#########################
     ############### Losses proposed in yolox6d ######################
@@ -1124,8 +1137,8 @@ class SetCriterion(nn.Module):
 
             # Compute individual losses
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
-            #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
-            loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
