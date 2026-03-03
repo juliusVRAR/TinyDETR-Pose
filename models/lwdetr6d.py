@@ -26,7 +26,7 @@ from pyparsing import Path
 import torch
 import torch.nn.functional as F
 from torch import nn
-
+from util.rotation_utils import so3_log_map
 from util import box_ops
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size,
@@ -610,8 +610,8 @@ class SetCriterion(nn.Module):
         losses["loss_rot"] = loss.sum() / num_boxes
         
         return losses
-    # geodesic distance loss for rotation matrix
-    def loss_rotation(self,
+    # sym aware geodesic distance loss for rotation matrix
+    def loss_rotation_sym(self,
                       outputs,
                       targets, 
                       indices, 
@@ -1090,7 +1090,57 @@ class SetCriterion(nn.Module):
         
         return losses    
     ############# T6D symmetric aware loss end  ########################
-    
+    # geodensic rotation loss 
+    def loss_rotation(self, outputs, targets, indices, num_boxes):
+        """
+        Compute the loss related to the rotation of pose estimation represented by a 3x3 rotation matrix.
+        The function calculates the geodesic distance between the predicted and target rotation.
+        L = arccos( 0.5 * (Trace(R\tilde(R)^T) -1)
+        Calculates the loss in radiant.
+        """
+        eps = 1e-6
+        idx = self._get_src_permutation_idx(indices)
+        src_rot = outputs["pred_rotations"][idx]
+        tgt_rot = torch.cat([t['relative_rotation'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        n_obj = len(tgt_rot)
+
+        product = torch.bmm(src_rot, tgt_rot.transpose(1, 2))
+        trace = torch.sum(product[:, torch.eye(3).bool()], 1)
+        theta = torch.clamp(0.5 * (trace - 1), -1 + eps, 1 - eps)
+        rad = torch.acos(theta)
+        losses = {}
+        losses["loss_rot"] = rad.sum() / num_boxes
+
+        return losses
+    # TODO: Fix. Its broken atm.
+    def loss_rotation_aleatoric(self, outputs, targets, indices, num_boxes):
+        """
+        Extension of the rotation loss to train for aleatoric uncertainty estimation.
+        Loss is calculated according to: Aleatoric Uncertainty from AI-based 6D Object Pose Predictors for Object-relative State Estimation
+        (https://doi.org/10.1109/LRA.2025.3606700)(https://www.arxiv.org/abs/2509.01583)
+        The paper also explains simplifications.
+        """
+        eps = 1e-6
+        idx = self._get_src_permutation_idx(indices)
+        src_rot = outputs["pred_rotation"][idx]
+        src_rot_aleatoric = outputs["pred_rotation_aleatoric"][idx]
+        tgt_rot = torch.cat([t['relative_rotation'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        n_obj = num_boxes
+
+        diff_matrix = torch.bmm(src_rot, tgt_rot.transpose(1, 2))
+        # Special case: instead of sigma^2, we predict s = log(sigma^2) to ensure numerical stability and positiveness
+        s_sum = torch.sum(src_rot_aleatoric, dim=1)
+        exp_neg_s = torch.exp(-src_rot_aleatoric)
+
+        # Transform diff matrices into the lie algebra so(3) using the logarithmic map
+        v = so3_log_map(diff_matrix)
+        scaled_squared_euclidean = exp_neg_s * torch.square(v)
+        scaled_squared_euclidean = torch.sum(scaled_squared_euclidean, dim=1)
+        loss_rotation_aleatoric = scaled_squared_euclidean + s_sum
+        losses = {}
+        losses["loss_rot"] = loss_rotation_aleatoric.sum() / (2 * n_obj)
+        return losses
+
     # Put all pose losses together
     def loss_pose(self, 
               outputs, 
@@ -1137,7 +1187,12 @@ class SetCriterion(nn.Module):
 
             # Compute individual losses
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
+            # Geodensic Loss
             loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            # Geodensic Loss symmetry aware.
+            #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rotation_aleatoric(outputs, targets, indices, num_boxes)
+            # 6D representation with L1 loss (YOLOX6D Approach)
             #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
