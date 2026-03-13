@@ -1112,12 +1112,12 @@ class SetCriterion(nn.Module):
         losses["loss_rot"] = rad.sum() / num_boxes
 
         return losses
-    # TODO: Fix. Its broken atm.
+    # Test losses 
     def loss_trans_z_with_ablation(self,
-                 outputs,
-                 targets,
-                 indices,
-                 num_boxes):
+                                    outputs,
+                                    targets,
+                                    indices,
+                                    num_boxes):
 
         idx = self._get_src_permutation_idx(indices)
 
@@ -1166,6 +1166,114 @@ class SetCriterion(nn.Module):
 
         return {'loss_trans_z': loss}
 
+    def loss_rotation_ablate(self,
+                      outputs,
+                      targets,
+                      indices,
+                      num_boxes,
+                      lambda_geo: float = 1.0,
+                      lambda_add: float = 0.5):
+        """
+        Rotation loss with symmetric / non-symmetric branching.
+
+        Symmetric     →  ADD-S only
+        Non-Symmetric →  λ_geo * Geodesic  +  λ_add * ADD
+
+        Uses _get_src_permutation_idx for consistency with all other DETR losses —
+        flattens (B, Q) predictions into (N,) matched predictions in one index op,
+        identical to loss_trans_z, loss_adds, etc.
+        """
+        # ── Single vectorized index — consistent with all other losses ──
+        idx = self._get_src_permutation_idx(indices)        # (batch_idx, src_idx)
+
+        # ── Predictions ─────────────────────────────────────────────────
+        R_p = outputs['pred_rotations'][idx]                # (N, 3, 3)
+        t_p = outputs['pred_translations'][idx]             # (N, 3)
+
+        # ── Targets ─────────────────────────────────────────────────────
+        R_g = torch.cat(
+            [t['relative_rotation'][i].float() for t, (_, i) in zip(targets, indices)], dim=0
+        )                                                   # (N, 3, 3)
+
+        t_g = torch.cat(
+            [t['relative_position'][i].float() for t, (_, i) in zip(targets, indices)], dim=0
+        )                                                   # (N, 3)
+
+        pts = torch.cat(
+            [t['model_points'][i].float() for t, (_, i) in zip(targets, indices)], dim=0
+        )                                                   # (N, P, 3)
+
+        sym = torch.cat(
+            [t['is_symmetric'][i].bool() for t, (_, i) in zip(targets, indices)], dim=0
+        )                                                   # (N,) bool
+
+        # ── Symmetric / Non-symmetric masks ─────────────────────────────
+        sym_mask  =  sym                                    # (N,) bool
+        asym_mask = ~sym                                    # (N,) bool
+
+        # Tensor zeros — correct device/dtype/graph
+        loss_geo  = R_p.new_zeros(1)
+        loss_add  = R_p.new_zeros(1)
+        loss_adds = R_p.new_zeros(1)
+
+        # -----------------------------------------------------------
+        # NON-SYMMETRIC: Geodesic + ADD
+        # -----------------------------------------------------------
+        if asym_mask.any():
+            R_p_asym = R_p[asym_mask]                       # (A, 3, 3)
+            R_g_asym = R_g[asym_mask]                       # (A, 3, 3)
+            t_p_asym = t_p[asym_mask]                       # (A, 3)
+            t_g_asym = t_g[asym_mask]                       # (A, 3)
+            pts_asym = pts[asym_mask]                       # (A, P, 3)
+
+            # Geodesic distance on SO(3)
+            R_rel   = torch.bmm(R_p_asym.transpose(-2, -1), R_g_asym)      # (A, 3, 3)
+            trace   = R_rel.diagonal(dim1=-2, dim2=-1).sum(dim=-1)          # (A,)
+            cos_ang = ((trace - 1.0) / 2.0).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+            loss_geo = torch.acos(cos_ang).sum()                            # scalar
+
+            # ADD — 1-to-1 mean point distance
+            pts_p_asym = torch.bmm(R_p_asym, pts_asym.transpose(1, 2)).transpose(1, 2) \
+                        + t_p_asym.unsqueeze(1)                            # (A, P, 3)
+            pts_g_asym = torch.bmm(R_g_asym, pts_asym.transpose(1, 2)).transpose(1, 2) \
+                        + t_g_asym.unsqueeze(1)                            # (A, P, 3)
+            loss_add   = (pts_p_asym - pts_g_asym).norm(dim=-1).mean(dim=-1).sum()  # scalar
+
+        # -----------------------------------------------------------
+        # SYMMETRIC: ADD-S only
+        # -----------------------------------------------------------
+        if sym_mask.any():
+            R_p_sym = R_p[sym_mask]                         # (S, 3, 3)
+            R_g_sym = R_g[sym_mask]                         # (S, 3, 3)
+            t_p_sym = t_p[sym_mask]                         # (S, 3)
+            t_g_sym = t_g[sym_mask]                         # (S, 3)
+            pts_sym = pts[sym_mask]                         # (S, P, 3)
+
+            pts_p_sym = torch.bmm(R_p_sym, pts_sym.transpose(1, 2)).transpose(1, 2) \
+                        + t_p_sym.unsqueeze(1)              # (S, P, 3)
+            pts_g_sym = torch.bmm(R_g_sym, pts_sym.transpose(1, 2)).transpose(1, 2) \
+                        + t_g_sym.unsqueeze(1)              # (S, P, 3)
+
+            pairwise  = torch.cdist(pts_p_sym, pts_g_sym, p=2)             # (S, P, P)
+            loss_adds = pairwise.min(dim=2).values.mean(dim=1).sum()       # scalar
+
+        # ── Aggregate & normalize ────────────────────────────────────────
+        safe_num_boxes = max(num_boxes, 1)
+
+        loss = (
+            loss_adds
+            + lambda_geo * loss_geo
+            + lambda_add * loss_add
+        ) / safe_num_boxes
+
+        return {
+            'loss_rotation'     : loss,
+            'loss_rotation_geo' : (loss_geo  / safe_num_boxes).detach(),
+            'loss_rotation_add' : (loss_add  / safe_num_boxes).detach(),
+            'loss_rotation_adds': (loss_adds / safe_num_boxes).detach(),
+        }
+
+
     # Put all pose losses together
     def loss_pose(self, 
               outputs, 
@@ -1212,11 +1320,12 @@ class SetCriterion(nn.Module):
 
             # Compute individual losses
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
+            # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
+            loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
             # Geodensic Loss
-            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
-            # Geodensic Loss symmetry aware.
+            #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            # Geodensic Loss symmetry aware. Sucks
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
-            #loss_rot_dict = self.loss_rotation_aleatoric(outputs, targets, indices, num_boxes)
             # 6D representation with L1 loss (YOLOX6D Approach)
             #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
