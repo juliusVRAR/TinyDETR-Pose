@@ -1113,33 +1113,58 @@ class SetCriterion(nn.Module):
 
         return losses
     # TODO: Fix. Its broken atm.
-    def loss_rotation_aleatoric(self, outputs, targets, indices, num_boxes):
-        """
-        Extension of the rotation loss to train for aleatoric uncertainty estimation.
-        Loss is calculated according to: Aleatoric Uncertainty from AI-based 6D Object Pose Predictors for Object-relative State Estimation
-        (https://doi.org/10.1109/LRA.2025.3606700)(https://www.arxiv.org/abs/2509.01583)
-        The paper also explains simplifications.
-        """
-        eps = 1e-6
+    def loss_trans_z_with_ablation(self,
+                 outputs,
+                 targets,
+                 indices,
+                 num_boxes):
+
         idx = self._get_src_permutation_idx(indices)
-        src_rot = outputs["pred_rotation"][idx]
-        src_rot_aleatoric = outputs["pred_rotation_aleatoric"][idx]
-        tgt_rot = torch.cat([t['relative_rotation'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        n_obj = num_boxes
 
-        diff_matrix = torch.bmm(src_rot, tgt_rot.transpose(1, 2))
-        # Special case: instead of sigma^2, we predict s = log(sigma^2) to ensure numerical stability and positiveness
-        s_sum = torch.sum(src_rot_aleatoric, dim=1)
-        exp_neg_s = torch.exp(-src_rot_aleatoric)
+        # ---------------------------------------------------------------
+        # OPTION A: Laplacian Uncertainty (normalized Z, unitless)
+        # ---------------------------------------------------------------
+        src_norm_z  = outputs['pred_trans_z'][idx]
+        src_log_var = outputs['pred_z_log_var'][idx]
+        src_log_var = torch.clamp(src_log_var, min=-10.0, max=10.0)
 
-        # Transform diff matrices into the lie algebra so(3) using the logarithmic map
-        v = so3_log_map(diff_matrix)
-        scaled_squared_euclidean = exp_neg_s * torch.square(v)
-        scaled_squared_euclidean = torch.sum(scaled_squared_euclidean, dim=1)
-        loss_rotation_aleatoric = scaled_squared_euclidean + s_sum
-        losses = {}
-        losses["loss_rot"] = loss_rotation_aleatoric.sum() / (2 * n_obj)
-        return losses
+        tgt_trans_z = torch.cat([t['relative_translation_z'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+
+        l1_error = torch.abs(src_norm_z - tgt_trans_z)
+        loss = (l1_error * torch.exp(-src_log_var)) + src_log_var
+        loss = loss.sum() / num_boxes
+
+        # ---------------------------------------------------------------
+        # OPTION B: Smooth L1 on log(Z) — Ablation (no uncertainty)
+        # ---------------------------------------------------------------
+        # src_z_meters = outputs['pred_tz_meters'][idx]                    # already scaled by max_depth
+        # tgt_trans    = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        # tgt_z_meters = tgt_trans[:, 2]
+        # loss         = self.loss_relative_log_l1(src_z_meters, tgt_z_meters) / num_boxes
+
+        # ---------------------------------------------------------------
+        # OPTION C: Kendall & Gal — Uncertainty-Weighted Smooth L1 on log(Z)
+        # ---------------------------------------------------------------
+        # Both tensors come directly from your MLP's two output channels —
+        # no extra head needed, your z_dim=2 design already encodes this.
+        # ---------------------------------------------------------------
+        # # 1. Channel 0 — metric Z (sigmoid * max_depth already applied in forward)
+        # src_z_meters = outputs['pred_tz_meters'][idx]                    # (N,)
+
+        # # 2. Channel 1 — log σ², clamp BEFORE passing to loss helper
+        # src_log_var  = outputs['pred_z_log_var'][idx].squeeze(-1)        # (N,)
+        # src_log_var  = torch.clamp(src_log_var, min=-10.0, max=10.0)
+
+        # # 3. Targets
+        # tgt_trans    = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        # tgt_z_meters = tgt_trans[:, 2]                                   # (N,) in meters
+
+        # # 4. Uncertainty-weighted Smooth L1 in log-space
+        # loss = self.loss_relative_log_l1_uncertainty(
+        #     src_z_meters, tgt_z_meters, src_log_var
+        # ) / num_boxes
+
+        return {'loss_trans_z': loss}
 
     # Put all pose losses together
     def loss_pose(self, 
