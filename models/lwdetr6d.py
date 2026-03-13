@@ -897,6 +897,20 @@ class SetCriterion(nn.Module):
        
         return {'loss_trans_z': loss_trans_z}
     
+    def loss_trans_z_smooth_l1(self,
+                    outputs,
+                    targets,
+                    indices,
+                    num_boxes):
+        idx = self._get_src_permutation_idx(indices)
+        pred_trans_z = outputs['pred_translations'][idx][:, -1]
+        tgt_trans_z = torch.cat(
+            [t['relative_position'][i] for t, (_, i) in zip(targets, indices)],
+            dim=0
+        )[:, -1]
+        loss_trans_z = F.smooth_l1_loss(pred_trans_z, tgt_trans_z, reduction='sum') / num_boxes
+        return {'loss_trans_z': loss_trans_z}
+    
     def loss_trans_z_l2(self, outputs, targets, indices, num_boxes):
         """
         Compute the loss related to the translation of pose estimation, namely the mean square error (MSE)/ L2 Loss.
@@ -1330,7 +1344,7 @@ class SetCriterion(nn.Module):
             #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
-            loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
+            loss_trans_z = self.loss_trans_z_smooth_l1(outputs, targets, indices, num_boxes)
             
             # Extract loss values
             loss_adds = loss_adds_dict['loss_adds']
