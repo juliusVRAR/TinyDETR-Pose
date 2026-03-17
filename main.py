@@ -44,7 +44,8 @@ def get_args_parser():
     parser.add_argument('--lr_encoder', default=1.5e-6, type=float) 
     parser.add_argument('--lr_backbone', default=1e-6, type=float) 
     parser.add_argument('--lr_transformer', default=1e-5, type=float)
-    parser.add_argument('--batch_size', default=2, type=int)
+    parser.add_argument('--batch_size', default=2, type=int,
+                        help='per-GPU batch size')
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=12, type=int)
     parser.add_argument('--lr_drop', default=11, type=int)
@@ -398,6 +399,18 @@ def main(args):
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, 
                                  num_workers=args.num_workers)
+    # Pose evaluation should be world-size invariant; run it on full val set from rank 0.
+    data_loader_pose_val = None
+    if utils.is_main_process():
+        pose_sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        data_loader_pose_val = DataLoader(
+            dataset_val,
+            args.batch_size,
+            sampler=pose_sampler_val,
+            drop_last=False,
+            collate_fn=utils.collate_fn,
+            num_workers=args.num_workers,
+        )
     
     base_ds = get_coco_api_from_dataset(dataset_val)
 
@@ -459,18 +472,21 @@ def main(args):
             model, criterion, postprocessors, data_loader_val, base_ds, device, args)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
-    if args.resume:
-        eval_epoch = checkpoint['epoch']
+    eval_epoch = checkpoint['epoch'] if args.resume else None
     
     if args.eval or args.pose_eval_only:
         print("Pose Eval.")
-        pose_evaluate(model=model, 
-                    matcher=matcher, 
-                    pose_evaluator=pose_evaluator,
-                    data_loader=data_loader_val, 
-                    image_set=args.eval_set, bbox_mode=args.bbox_mode,
-                    quick_mode=args.quick_eval, 
-                    device=device, output_dir=args.output_dir, epoch=eval_epoch)
+        if utils.is_main_process():
+            pose_loader = data_loader_pose_val if data_loader_pose_val is not None else data_loader_val
+            pose_evaluate(model=model, 
+                        matcher=matcher, 
+                        pose_evaluator=pose_evaluator,
+                        data_loader=pose_loader, 
+                        image_set=args.eval_set, bbox_mode=args.bbox_mode,
+                        quick_mode=args.quick_eval, 
+                        device=device, output_dir=args.output_dir, epoch=eval_epoch)
+        if args.distributed:
+            torch.distributed.barrier()
         return
     # Evaluate the model for the BOP challenge
     if args.eval_bop:
@@ -482,6 +498,8 @@ def main(args):
 
     # for drop
     total_batch_size = args.batch_size * utils.get_world_size()
+    if utils.is_main_process():
+        print(f"Batch config: per_gpu={args.batch_size}, world_size={utils.get_world_size()}, total={total_batch_size}")
     num_training_steps_per_epoch = (len(dataset_train) + total_batch_size - 1) // total_batch_size
     schedules = {}
     if args.dropout > 0:
@@ -567,50 +585,54 @@ def main(args):
             and should_run_pose_eval(epoch, args.epochs, args.warm_up_epochs)
         )
 
-        if run_pose_eval and utils.is_main_process():
-            # Last epoch: force full evaluation (ignore quick_eval flag)
-            # if (epoch + 1) == args.epochs:
-            #     quick_mode = False
-            # else:
-            #     quick_mode = True
-            quick_mode = False
-            # ADD, ADD-S, ADD(-S)
-            current_add_score, current_adi_score, current_adds_score, current_avg_translation_error, current_avg_rotation_error = pose_evaluate(
-                model=model,
-                matcher=matcher,
-                pose_evaluator=pose_evaluator,
-                data_loader=data_loader_val,
-                image_set=args.eval_set,
-                bbox_mode=args.bbox_mode,
-                quick_mode=quick_mode,
-                device=device,
-                output_dir=args.output_dir,
-                epoch=epoch,
-                
-            )
-            print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
-
-            # TensorBoard logging for pose metrics
-            if writer:
-                writer.add_scalar("val/pose_ADD", current_add_score, epoch)
-                writer.add_scalar("val/pose_ADI", current_adi_score, epoch)
-                writer.add_scalar("val/pose_ADDS", current_adds_score, epoch)
-                writer.add_scalar("val/pose_avg_translation_error", current_avg_translation_error, epoch)
-                writer.add_scalar("val/pose_avg_rotation_error", current_avg_rotation_error, epoch)
-            
-            # Save Best Model (maximize ADD-S)
-            if current_adds_score > best_adds_score:
-                best_adds_score = current_adds_score
-                print("🚀 New Best Model found! Saving checkpoint...")
-                torch.save(
-                    {
-                        'model': model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'epoch': epoch,
-                        'score': best_adds_score,
-                    },
-                    "checkpoint_best_adds.pth",
+        if run_pose_eval:
+            if utils.is_main_process():
+                # Last epoch: force full evaluation (ignore quick_eval flag)
+                # if (epoch + 1) == args.epochs:
+                #     quick_mode = False
+                # else:
+                #     quick_mode = True
+                quick_mode = False
+                pose_loader = data_loader_pose_val if data_loader_pose_val is not None else data_loader_val
+                # ADD, ADD-S, ADD(-S)
+                current_add_score, current_adi_score, current_adds_score, current_avg_translation_error, current_avg_rotation_error = pose_evaluate(
+                    model=model,
+                    matcher=matcher,
+                    pose_evaluator=pose_evaluator,
+                    data_loader=pose_loader,
+                    image_set=args.eval_set,
+                    bbox_mode=args.bbox_mode,
+                    quick_mode=quick_mode,
+                    device=device,
+                    output_dir=args.output_dir,
+                    epoch=epoch,
+                    
                 )
+                print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
+
+                # TensorBoard logging for pose metrics
+                if writer:
+                    writer.add_scalar("val/pose_ADD", current_add_score, epoch)
+                    writer.add_scalar("val/pose_ADI", current_adi_score, epoch)
+                    writer.add_scalar("val/pose_ADDS", current_adds_score, epoch)
+                    writer.add_scalar("val/pose_avg_translation_error", current_avg_translation_error, epoch)
+                    writer.add_scalar("val/pose_avg_rotation_error", current_avg_rotation_error, epoch)
+                
+                # Save Best Model (maximize ADD-S)
+                if current_adds_score > best_adds_score:
+                    best_adds_score = current_adds_score
+                    print("🚀 New Best Model found! Saving checkpoint...")
+                    torch.save(
+                        {
+                            'model': model.state_dict(),
+                            'optimizer': optimizer.state_dict(),
+                            'epoch': epoch,
+                            'score': best_adds_score,
+                        },
+                        "checkpoint_best_adds.pth",
+                    )
+            if args.distributed:
+                torch.distributed.barrier()
         if writer:
             # Validation metrics
             for k, v in test_stats.items():

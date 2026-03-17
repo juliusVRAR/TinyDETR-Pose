@@ -1335,7 +1335,7 @@ class SetCriterion(nn.Module):
             # Compute individual losses
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
-            loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             # Geodensic Loss
             #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
