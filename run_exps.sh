@@ -3,26 +3,29 @@
 mail=julius.kuehn@igd.fraunhofer.de
 # run this with sh on an amperecontrol
 # Hardware 
-gpus=7
-cpus=200
-ram=800G
-# Model config 
+node=ampere4
+cpus=220
+ram=900G
+gpus=8
+qos="normal"
+###################################
+# Model options: tiny, small, medium, large, xlarge
 model='tiny'
 task='train'
 # Slurm reports land here
 slurm_out="$HOME/lw-detr6d/slurm_${task}_${model}"
 # Detection Loss config
 coef_clas=2.0
-coef_bbox=5.0
-coef_giou=2.0
+coef_bbox=3.0
+coef_giou=1.0
 # Pose Loss config
+coef_adds=0.0 
 coef_kpt=1.0
-coef_trans_xy=1.0
-coef_trans_z=1.0 
-coef_adds=1.5
-coef_rot=1.0
+coef_rot=6.0
+coef_trans_xy=0.0
+coef_trans_z=2.0
 #TODO: Derive jobname from config.
-job_name="${task}_${model}_a_${coef_adds}"
+job_name="${task}_${model}_a_${coef_adds}_kpt_${coef_kpt}_r_${coef_rot}_yx_${coef_trans_xy}_z_${coef_trans_z}"
 # Check if path exists (file or directory)
 if [ -e $slurm_out ]; then
     echo "Path $slurm_out exists"
@@ -38,8 +41,9 @@ sbatch --job-name=$job_name \
         --error=$slurm_out/%j-%x.err \
         --export=COEF_ROT=$coef_rot,COEF_KPT=$coef_kpt,COEF_TRANS_XY=$coef_trans_xy,COEF_TRANS_Z=$coef_trans_z,COEF_ADDS=$coef_adds,COEF_CLAS=$coef_clas,COEF_BBOX=$coef_bbox,COEF_GIOU=$coef_giou,MODEL=$model,TASK=$task,SLURM_OUT=$slurm_out,JOB_NAME=$job_name \
         --mail-user=$mail \
-        --mail-type=BEGIN,END,FAIL \
-        --nodelist=ampere4 \
+        --mail-type=BEGIN,END,FAIL,ALL \
+        --qos=$qos \
+        --nodelist=$node \
         run_on_cluster.sh
 
 ###################################
