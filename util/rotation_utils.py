@@ -414,7 +414,63 @@ def rotation_matrix_to_raw_6d(R: torch.Tensor) -> torch.Tensor:
     # Permute to (B, 2, 3) so each row is one column, then flatten to (B,6)
     raw6d = first_two.permute(0, 2, 1).reshape(R.size(0), 6)
     return raw6d
+
 def rotation_6d_to_matrix(rot_6d):
+    """
+    Converts 6D rotation representation to SO(3) rotation matrix via
+    Gram-Schmidt orthogonalization (Zhou et al., CVPR 2019).
+    https://openaccess.thecvf.com/content_CVPR_2019/papers/Zhou_On_the_Continuity_of_Rotation_Representations_in_Neural_Networks_CVPR_2019_paper.pdf
+
+    Uses standard Zhou et al. convention:
+        Free parameters: a1 (col1), a2 (col2)
+        b1 = normalize(a1)
+        b2 = normalize(a2 - (b1·a2) * b1)    ← GS orthogonalize then normalize
+        b3 = cross(b1, b2)                    ← fully determined, no free param
+
+    FIX 1: Switched from POET convention (x, z free → y derived) to
+            standard Zhou convention (col1, col2 free → col3 derived).
+            POET convention caused a column ordering mismatch against
+            YCB-V ground truth rotations, explaining the 77° plateau.
+
+    FIX 2: Replaced brittle manual shape unpacking with shape[-1] reshape
+            pattern — handles (B,Q,6) and (D,B,Q,6) without explicit branches.
+
+    FIX 3: Single Gram-Schmidt here only. Removed the redundant inline GS
+            (rot_c1/rot_c2) from forward() — double GS was adding unnecessary
+            operations to the gradient path near convergence.
+
+    Args:
+        rot_6d: (..., 6) — raw MLP output, any leading batch dims
+    Returns:
+        (..., 3, 3) rotation matrix in SO(3), columns = [b1, b2, b3]
+    """
+    # FIX 2: preserve all leading dims generically — no manual unpacking
+    leading = rot_6d.shape[:-1]         # e.g. (D,B,Q) or (B,Q)
+    rot_6d  = rot_6d.reshape(-1, 6)     # (N, 6)
+
+    a1 = rot_6d[:, :3]                  # (N, 3) — first free parameter
+    a2 = rot_6d[:, 3:]                  # (N, 3) — second free parameter
+
+    # FIX 1: Standard Zhou et al. Gram-Schmidt
+    # Column 1: normalize directly
+    b1 = F.normalize(a1, p=2, dim=1)                                        # (N, 3)
+
+    # Column 2: remove b1 component from a2, then normalize
+    b2 = F.normalize(a2 - (b1 * a2).sum(dim=1, keepdim=True) * b1,
+                     p=2, dim=1)                                             # (N, 3)
+
+    # Column 3: fully determined by right-hand rule
+    b3 = torch.cross(b1, b2, dim=1)                                         # (N, 3)
+
+    # Stack as columns: R = [b1 | b2 | b3]
+    # R @ p_obj = p_cam  (standard camera convention)
+    R = torch.stack([b1, b2, b3], dim=-1)                                   # (N, 3, 3)
+
+    # FIX 2: restore all leading dims generically
+    return R.reshape(*leading, 3, 3)
+
+
+def rotation_6d_to_matrix_old(rot_6d):
     """
     Given a 6D rotation output, calculate the 3D rotation matrix in SO(3) using the Gramm Schmit process
 

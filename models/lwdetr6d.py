@@ -292,21 +292,21 @@ class LWDETR6D(nn.Module):
         # Prepare pred rotation for criterion
         pred_rots = self.dec_rot_head(hs)
         
-        if self.training:
-            rot_c1 = F.normalize(pred_rots[:, :, :, :3], dim=3) 
-            rot_c2 = F.normalize(pred_rots[:, :, :, 3:] - torch.sum(rot_c1 * pred_rots[:, :, :, 3:], dim=3, keepdim=True) * rot_c1, dim=3) 
-        else:
-            # TODO: This can lead to NaNs if the norm is zero, need to be careful. 
-            rot_c1 = (pred_rots[:, :, :, :3] / pred_rots[:, :, :, :3].norm(p=2, dim=3, keepdim=True))
-            # Old version:
-            # rot_c2 =  pred_rots[:, :, :, 3:] - torch.sum(rot_c1 * pred_rots[:, :, :, 3:], dim=2, keepdim=True) * rot_c1
-            # Shouldnt this be dim=3 
-            rot_c2 =  pred_rots[:, :, :, 3:] - torch.sum(rot_c1 * pred_rots[:, :, :, 3:], dim=3, keepdim=True) * rot_c1
-            rot_c2 = rot_c2 / rot_c2.norm(p=2, dim=3, keepdim=True)
+        # if self.training:
+        #     rot_c1 = F.normalize(pred_rots[:, :, :, :3], dim=3) 
+        #     rot_c2 = F.normalize(pred_rots[:, :, :, 3:] - torch.sum(rot_c1 * pred_rots[:, :, :, 3:], dim=3, keepdim=True) * rot_c1, dim=3) 
+        # else:
+        #     # TODO: This can lead to NaNs if the norm is zero, need to be careful. 
+        #     rot_c1 = (pred_rots[:, :, :, :3] / pred_rots[:, :, :, :3].norm(p=2, dim=3, keepdim=True))
+        #     # Old version:
+        #     # rot_c2 =  pred_rots[:, :, :, 3:] - torch.sum(rot_c1 * pred_rots[:, :, :, 3:], dim=2, keepdim=True) * rot_c1
+        #     # Shouldnt this be dim=3 
+        #     rot_c2 =  pred_rots[:, :, :, 3:] - torch.sum(rot_c1 * pred_rots[:, :, :, 3:], dim=3, keepdim=True) * rot_c1
+        #     rot_c2 = rot_c2 / rot_c2.norm(p=2, dim=3, keepdim=True)
 
 
-        # Gram-Schmidt representation
-        output_rots = torch.cat([rot_c1, rot_c2], dim=3)
+        # # Gram-Schmidt representation
+        # output_rots = torch.cat([rot_c1, rot_c2], dim=3)
         
 
         output_trans = self.dec_trans_head(hs)
@@ -355,7 +355,7 @@ class LWDETR6D(nn.Module):
             output_trans = torch.cat([pred_tx, pred_ty, pred_tz], dim=-1)
 
         # Postprocess output_rots for loss
-        output_rots = self.process_rotation(output_rots)
+        output_rots = self.process_rotation(pred_rots)
         out = {'pred_logits': outputs_class[-1], 
                'pred_boxes': outputs_coord[-1],
                'pred_rotations': output_rots[-1],

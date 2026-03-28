@@ -27,6 +27,7 @@ import os
 import numpy as np
 import time
 from evaluation_tools.metrics import get_src_permutation_idx, calc_rotation_error, calc_translation_error
+from util.rotation_utils import rotation_6d_to_matrix
 DEBUG = False
 DEBUG_OUT=Path("debug")
 
@@ -62,6 +63,45 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+
+        # # ── Run diagnostic on very first batch only ──────────────────
+        
+        # with torch.no_grad():
+        #     for b in range(len(targets)):
+        #         # Find a non-empty target in this batch
+        #         if len(targets[b]['relative_rotation']) == 0:
+        #             continue
+                
+        #         R_gt = targets[b]['relative_rotation'][0].float()   # (3, 3)
+                
+        #         # Pack GT rotation into 6D using col1 + col2
+        #         col1    = R_gt[:, 0]                                # (3,)
+        #         col2    = R_gt[:, 1]                                # (3,)
+        #         rot_6d_gt = torch.cat([col1, col2], dim=0)          # (6,)
+                
+        #         # Run through your rotation_6d_to_matrix
+        #         R_reconstructed = rotation_6d_to_matrix(
+        #             rot_6d_gt.view(1, 1, 6).to(R_gt.device)
+        #         )[0, 0]                                             # (3, 3)
+                
+        #         # Geodesic between GT and reconstructed GT
+        #         R_rel   = R_reconstructed.T @ R_gt
+        #         trace   = R_rel.diagonal().sum()
+        #         cos_ang = ((trace - 1.0) / 2.0).clamp(-1 + 1e-6, 1 - 1e-6)
+        #         geo     = torch.acos(cos_ang)
+                
+        #         print("=" * 60)
+        #         print(f"[DIAGNOSTIC] Convention check on GT rotation")
+        #         print(f"Geodesic error on perfect prediction: {geo.item():.6f} rad")
+        #         print(f"Expected: ~0.000000  |  If not → convention mismatch")
+        #         print(f"R_gt:\n{R_gt.cpu().numpy().round(4)}")
+        #         print(f"R_reconstructed:\n{R_reconstructed.cpu().numpy().round(4)}")
+        #         print(f"Match: {torch.allclose(R_gt, R_reconstructed, atol=1e-4)}")
+        #         print("=" * 60)
+        #         break   # one sample is enough
+
+
         if DEBUG:
             if not os.path.exists(DEBUG_OUT):
                 os.makedirs(DEBUG_OUT)
