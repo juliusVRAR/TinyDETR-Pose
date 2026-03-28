@@ -82,15 +82,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             # print(f"Grid saved as {filename}")
         outputs = model(samples, targets)
 
-        # Update the weight in the criterion's dictionary BEFORE summing
         if epoch < args.warm_up_epochs:
-            # Add adds loss with small weight during the initial training phase. So we learn something about symmetric objects early on.
-            criterion.weight_dict['loss_adds'] = 0.1
-            criterion.weight_dict['loss_trans_xy'] = 1.0
+            # Pose heads are randomly initialized — rotation predictions are garbage
+            # Suppress rotation so corrupted geodesic gradients don't poison early training
+            # Let keypoints and Z stabilize first since they're simpler to learn
+            criterion.weight_dict['loss_rot']      = args.rot_loss_coef * 0.1   # suppressed
+            criterion.weight_dict['loss_keypoint'] = args.keypoint_loss_coef    # full — stabilizes 2D
+            criterion.weight_dict['loss_trans_z']  = args.trans_z_loss_coef     # full — independent of rot
+
         else:
-            criterion.weight_dict['loss_adds'] = args.adds_loss_coef
-            # Disable metric XY consistency to let Z converge first. 
-            criterion.weight_dict['loss_trans_xy'] = args.trans_xy_loss_coef
+            # Matching is stable, keypoints converging — give rotation full signal
+            criterion.weight_dict['loss_rot']      = args.rot_loss_coef         # full
+            criterion.weight_dict['loss_keypoint'] = args.keypoint_loss_coef    # full
+            criterion.weight_dict['loss_trans_z']  = args.trans_z_loss_coef     # full
         # TODO: Reduce detection loss coeffs in later training stages.
         # Currently set to a very high epoch number to disable this.
         if epoch >= args.reduce_det_loss_epochs:

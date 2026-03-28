@@ -3,7 +3,7 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=64G
-#SBATCH --time=48:00:00
+#SBATCH --time=30:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
 #SBATCH --export=SLURM_OUT=not_called_from_exp
@@ -15,7 +15,7 @@
 
 
 # Copy config for reproducability
-REPORT_OUT="${SLURM_OUT}/${SLURM_JOB_ID}"
+REPORT_OUT="${SLURM_OUT}/${SLURM_JOB_ID}_${JOB_NAME}"
 mkdir -p $REPORT_OUT
 
 
@@ -29,7 +29,7 @@ gio_mount_nas()
 
 DSNAME=lw_detr6d_data
 
-DATAPATH=/opt/spool/$USER
+DATAPATH=/opt/cache/$USER
 # Check if path exists (file or directory)
 if [ -e $DATAPATH ]; then
     echo "Path $DATAPATH exists"

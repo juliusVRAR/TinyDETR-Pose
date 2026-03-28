@@ -1001,40 +1001,40 @@ class SetCriterion(nn.Module):
         
         idx = self._get_src_permutation_idx(indices)
         
-        # -------------------------------------------------------------
-        # OPTION A: Laplacian Uncertainty
-        # -------------------------------------------------------------
-        # 1. Get Predictions (Specific to Z and Uncertainty)
-        # We use the Normalized Z (0-1) for stability
-        src_norm_z = outputs['pred_trans_z'][idx] # Normalized between 0-1
-        # Get the Log Variance (s)
-        src_log_var = outputs['pred_z_log_var'][idx]
-        # safety guardrail because we are useing exp(-s) -> can explode/NaN
-        src_log_var = torch.clamp(src_log_var, min=-10.0, max=10.0)
-        # 2. Get Targets (Meters)
-        # Extract the full translation vector from targets
-        tgt_trans_z = torch.cat([t['relative_translation_z'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        # 4. Compute Laplacian Loss
-        # Formula: L = |y - y_hat| * exp(-s) + s
-        l1_error = torch.abs(src_norm_z - tgt_trans_z)
-        loss = (l1_error * torch.exp(-src_log_var)) + src_log_var
-        loss = loss.sum() / num_boxes
+        # # -------------------------------------------------------------
+        # # OPTION A: Laplacian Uncertainty
+        # # -------------------------------------------------------------
+        # # 1. Get Predictions (Specific to Z and Uncertainty)
+        # # We use the Normalized Z (0-1) for stability
+        # src_norm_z = outputs['pred_trans_z'][idx] # Normalized between 0-1
+        # # Get the Log Variance (s)
+        # src_log_var = outputs['pred_z_log_var'][idx]
+        # # safety guardrail because we are useing exp(-s) -> can explode/NaN
+        # src_log_var = torch.clamp(src_log_var, min=-10.0, max=10.0)
+        # # 2. Get Targets (Meters)
+        # # Extract the full translation vector from targets
+        # tgt_trans_z = torch.cat([t['relative_translation_z'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        # # 4. Compute Laplacian Loss
+        # # Formula: L = |y - y_hat| * exp(-s) + s
+        # l1_error = torch.abs(src_norm_z - tgt_trans_z)
+        # loss = (l1_error * torch.exp(-src_log_var)) + src_log_var
+        # loss = loss.sum() / num_boxes
         
-        # # -------------------------------------------------------------
-        # # OPTION B: Log-L1 Loss (Ablation Experiment)
-        # # -------------------------------------------------------------
-        # # USE: Metric Z (Meters)
-        # # Why: Physically intuitive log-ratio.
-        # # -------------------------------------------------------------
-        # # Extract Z from the Metric Translation vector
-        # src_z_meters = outputs['pred_translations'][idx][:, 2] 
-        # tgt_trans = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        # tgt_z_meters = tgt_trans[:, 2] # Already in meters
-        # # Calculate SUM of errors
-        # loss_z_sum = self.loss_relative_log_l1(src_z_meters, tgt_z_meters)
-        # # Normalize by global object count (Safety check for divide-by-zero)
-        # # Note: num_boxes is usually synced across GPUs in DETR
-        # loss = loss_z_sum / num_boxes
+        # -------------------------------------------------------------
+        # OPTION B: Log-L1 Loss (Ablation Experiment)
+        # -------------------------------------------------------------
+        # USE: Metric Z (Meters)
+        # Why: Physically intuitive log-ratio.
+        # -------------------------------------------------------------
+        # Extract Z from the Metric Translation vector
+        src_z_meters = outputs['pred_translations'][idx][:, 2] 
+        tgt_trans = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        tgt_z_meters = tgt_trans[:, 2] # Already in meters
+        # Calculate SUM of errors
+        loss_z_sum = self.loss_relative_log_l1(src_z_meters, tgt_z_meters)
+        # Normalize by global object count (Safety check for divide-by-zero)
+        # Note: num_boxes is usually synced across GPUs in DETR
+        loss = loss_z_sum / num_boxes
         
         return {'loss_trans_z': loss}
     ####################################################################################
@@ -1226,9 +1226,9 @@ class SetCriterion(nn.Module):
         asym_mask = ~sym                                    # (N,) bool
 
         # Tensor zeros — correct device/dtype/graph
-        loss_geo  = R_p.new_zeros(1)
-        loss_add  = R_p.new_zeros(1)
-        loss_adds = R_p.new_zeros(1)
+        loss_geo  = R_p.new_zeros(())
+        loss_add  = R_p.new_zeros(())
+        loss_adds = R_p.new_zeros(())
 
         # -----------------------------------------------------------
         # NON-SYMMETRIC: Geodesic + ADD
@@ -1281,7 +1281,7 @@ class SetCriterion(nn.Module):
         ) / safe_num_boxes
 
         return {
-            'loss_rotation'     : loss,
+            'loss_rot'     : loss,
             'loss_rotation_geo' : (loss_geo  / safe_num_boxes).detach(),
             'loss_rotation_add' : (loss_add  / safe_num_boxes).detach(),
             'loss_rotation_adds': (loss_adds / safe_num_boxes).detach(),
@@ -1333,7 +1333,7 @@ class SetCriterion(nn.Module):
             lambda_rot = 1.0
 
             # Compute individual losses
-            loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
+            #loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
             loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
             # Geodensic Loss
@@ -1344,10 +1344,10 @@ class SetCriterion(nn.Module):
             #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
-            loss_trans_z = self.loss_trans_z_smooth_l1(outputs, targets, indices, num_boxes)
+            loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
             
             # Extract loss values
-            loss_adds = loss_adds_dict['loss_adds']
+            #loss_adds = loss_adds_dict['loss_adds']
             loss_rot = loss_rot_dict['loss_rot']
             #loss_trans = loss_trans_dict['loss_translation']
             loss_kpt = loss_kpt_dict['loss_keypoint']
@@ -1355,8 +1355,14 @@ class SetCriterion(nn.Module):
             loss_trans_z = loss_trans_z['loss_trans_z']
 
             # Total weighted pose loss
+            # loss_pose_total = (
+            #     lambda_adds * loss_adds +
+            #     lambda_rot * loss_rot +
+            #     lambda_kpt * loss_kpt +
+            #     lambda_trans_z * loss_trans_z +
+            #     lambda_trans_xy * loss_trans_xy
+            # )
             loss_pose_total = (
-                lambda_adds * loss_adds +
                 lambda_rot * loss_rot +
                 lambda_kpt * loss_kpt +
                 lambda_trans_z * loss_trans_z +
@@ -1369,8 +1375,7 @@ class SetCriterion(nn.Module):
                 'loss_rot': loss_rot,
                 'loss_keypoint': loss_kpt,
                 'loss_trans_xy': loss_trans_xy,
-                'loss_trans_z': loss_trans_z,
-                'loss_adds': loss_adds
+                'loss_trans_z': loss_trans_z
             }
         else:
             return {}
