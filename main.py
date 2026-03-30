@@ -466,12 +466,16 @@ def main(args):
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
 
+    test_stats, coco_evaluator = {}, None
     if args.eval and not args.pose_eval_only:
-        print("COCO Eval.")
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args)
-        if args.output_dir:
-            utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+        if args.skip_coco_eval:
+            print("Skipping COCO Eval (--skip_coco_eval).")
+        else:
+            print("COCO Eval.")
+            test_stats, coco_evaluator = evaluate(
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args)
+            if args.output_dir:
+                utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
     eval_epoch = checkpoint['epoch'] if args.resume else None
     
     if args.eval or args.pose_eval_only:
@@ -518,6 +522,8 @@ def main(args):
     start_time = time.time()
     best_map_holder = BestMetricHolder(use_ema=args.use_ema)
     best_adds_score = 0.0
+    if args.skip_coco_eval and utils.is_main_process():
+        print("Skipping COCO eval during training (--skip_coco_eval).")
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start_time = time.time()
         if args.distributed:
@@ -571,9 +577,12 @@ def main(args):
                     })
                 utils.save_on_master(weights, checkpoint_path)
 
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args=args
-        )
+        if args.skip_coco_eval:
+            test_stats, coco_evaluator = {}, None
+        else:
+            test_stats, coco_evaluator = evaluate(
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args=args
+            )
         if args.resume:
             eval_epoch = checkpoint['epoch']
         else:
@@ -587,14 +596,10 @@ def main(args):
 
         if run_pose_eval:
             if utils.is_main_process():
-                # Last epoch: force full evaluation (ignore quick_eval flag)
-                # if (epoch + 1) == args.epochs:
-                #     quick_mode = False
-                # else:
-                #     quick_mode = True
-                quick_mode = False
+                # Keep scheduled validation cheap during training, but always run the final epoch in full.
+                quick_mode = args.quick_eval and (epoch + 1) != args.epochs
                 pose_loader = data_loader_pose_val if data_loader_pose_val is not None else data_loader_val
-                # ADD, ADD-S, ADD(-S)
+                # ADD, ADI, ADD(-S)
                 current_add_score, current_adi_score, current_adds_score, current_avg_translation_error, current_avg_rotation_error = pose_evaluate(
                     model=model,
                     matcher=matcher,
@@ -608,17 +613,17 @@ def main(args):
                     epoch=epoch,
                     
                 )
-                print(f"Epoch {epoch} Validation ADD-S: {current_adds_score:.2f}%")
+                print(f"Epoch {epoch} Validation ADD(-S): {current_adds_score:.2f}%")
 
                 # TensorBoard logging for pose metrics
                 if writer:
                     writer.add_scalar("val/pose_ADD", current_add_score, epoch)
                     writer.add_scalar("val/pose_ADI", current_adi_score, epoch)
-                    writer.add_scalar("val/pose_ADDS", current_adds_score, epoch)
+                    writer.add_scalar("val/pose_ADD_minus_S", current_adds_score, epoch)
                     writer.add_scalar("val/pose_avg_translation_error", current_avg_translation_error, epoch)
                     writer.add_scalar("val/pose_avg_rotation_error", current_avg_rotation_error, epoch)
                 
-                # Save Best Model (maximize ADD-S)
+                # Save best model by the mixed ADD(-S) validation score.
                 if current_adds_score > best_adds_score:
                     best_adds_score = current_adds_score
                     print("🚀 New Best Model found! Saving checkpoint...")
@@ -644,22 +649,24 @@ def main(args):
 
     if writer:
         writer.close()
-        map_regular = test_stats['coco_eval_bbox'][0]
-        _isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
-        if _isbest:
-            checkpoint_path = output_dir / 'checkpoint_best_regular.pth'
-            utils.save_on_master({
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'args': args,
-            }, checkpoint_path)
+        if not args.skip_coco_eval and 'coco_eval_bbox' in test_stats:
+            map_regular = test_stats['coco_eval_bbox'][0]
+            _isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
+            if _isbest:
+                checkpoint_path = output_dir / 'checkpoint_best_regular.pth'
+                utils.save_on_master({
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                }, checkpoint_path)
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
                      'epoch': epoch,
-                     'n_parameters': n_parameters}
-        if args.use_ema:
+                     'n_parameters': n_parameters,
+                     'skip_coco_eval': args.skip_coco_eval}
+        if args.use_ema and not args.skip_coco_eval:
             ema_test_stats, _ = evaluate(
                 ema_m.module, criterion, postprocessors, data_loader_val, base_ds, device, args=args
             )
@@ -669,19 +676,21 @@ def main(args):
             eval_epoch = None
             #pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
              #         args.rotation_representation, device, args.output_dir, eval_epoch)
-            log_stats.update({f'ema_test_{k}': v for k,v in ema_test_stats.items()})
-            map_ema = ema_test_stats['coco_eval_bbox'][0]
-            _isbest = best_map_holder.update(map_ema, epoch, is_ema=True)
-            if _isbest:
-                checkpoint_path = output_dir / 'checkpoint_best_ema.pth'
-                utils.save_on_master({
-                    'model': ema_m.module.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
-        log_stats.update(best_map_holder.summary())
+            if args.use_ema and not args.skip_coco_eval:
+                log_stats.update({f'ema_test_{k}': v for k,v in ema_test_stats.items()})
+                map_ema = ema_test_stats['coco_eval_bbox'][0]
+                _isbest = best_map_holder.update(map_ema, epoch, is_ema=True)
+                if _isbest:
+                    checkpoint_path = output_dir / 'checkpoint_best_ema.pth'
+                    utils.save_on_master({
+                        'model': ema_m.module.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'lr_scheduler': lr_scheduler.state_dict(),
+                        'epoch': epoch,
+                        'args': args,
+                    }, checkpoint_path)
+        if not args.skip_coco_eval:
+            log_stats.update(best_map_holder.summary())
         
         # epoch parameters
         ep_paras = {

@@ -321,13 +321,18 @@ class LWDETR6D(nn.Module):
         # Channel 1: Uncertainty (Log Variance) - No activation needed
         output_z_log_var = z_out[..., 1]
         pred_tz = output_norm_z * self.max_depth # Pred z in meters
-        #The backprojection has to happen on to the padded img not on the orginal size
-        valid_h = (~samples.mask[0]).any(dim=1).sum()
-        valid_w = (~samples.mask[0]).any(dim=0).sum()
-        img_h, img_w = int(valid_h), int(valid_w)
-        
-        u = output_uv_norm[..., 0:1] * img_w
-        v = output_uv_norm[..., 1:2] * img_h
+        # Use the valid image region per sample rather than reusing sample 0 for the whole batch.
+        if samples.mask is not None:
+            valid_mask = ~samples.mask
+            img_h = valid_mask.any(dim=2).sum(dim=1).to(dtype=output_uv_norm.dtype)
+            img_w = valid_mask.any(dim=1).sum(dim=1).to(dtype=output_uv_norm.dtype)
+        else:
+            batch_size = output_uv_norm.shape[1]
+            img_h = output_uv_norm.new_full((batch_size,), samples.tensors.shape[-2])
+            img_w = output_uv_norm.new_full((batch_size,), samples.tensors.shape[-1])
+
+        u = output_uv_norm[..., 0:1] * img_w.view(1, -1, 1, 1)
+        v = output_uv_norm[..., 1:2] * img_h.view(1, -1, 1, 1)
         
         # -----------------------------------------------------------
         # 3. The "Anti-Bias" Math Layer (Back-Projection)
@@ -388,8 +393,8 @@ class LWDETR6D(nn.Module):
     
                 trans_enc = self.transformer.enc_out_trans_embed[g_idx](enc_feat)  # (B, num_queries, 3)
                 uv_norm_enc = self.transformer.enc_out_trans_xy_embed[g_idx](trans_enc).sigmoid()  # (B, num_queries, 2)
-                u = uv_norm_enc[..., 0:1] * img_w
-                v = uv_norm_enc[..., 1:2] * img_h
+                u = uv_norm_enc[..., 0:1] * img_w.view(-1, 1, 1)
+                v = uv_norm_enc[..., 1:2] * img_h.view(-1, 1, 1)
                 # Prepare pred translation z for monocular depth estimation.
                 z_out_enc = (self.transformer.enc_out_trans_z_embed[g_idx](trans_enc))
                 # Split the output:
@@ -961,7 +966,34 @@ class SetCriterion(nn.Module):
         tgt_norm_uv = torch.cat([t['object_center_2d'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         loss_kpt = F.smooth_l1_loss(src_norm_uv, tgt_norm_uv, reduction='sum') / num_boxes
         return {'loss_keypoint': loss_kpt}
+    def loss_keypoint_oks(self, outputs, targets, indices, num_boxes):
+        """
+        OKS-based center supervision — scale-aware, matches YOLO-6D-Pose.
+        Normalizes pixel error by object bounding box area.
+        """
+        idx = self._get_src_permutation_idx(indices)
 
+        pred_uv = outputs['pred_uv_norm'][idx]          # (N, 2) normalized UV
+        tgt_uv  = torch.cat([t['object_center_2d'][i].float()
+                            for t, (_, i) in zip(targets, indices)], dim=0)  # (N, 2)
+
+        # Get bounding box area for scale normalization
+        # bbox is (cx, cy, w, h) normalized — area = w * h
+        tgt_bbox = torch.cat([t['boxes'][i].float()
+                            for t, (_, i) in zip(targets, indices)], dim=0)  # (N, 4)
+        bbox_area = tgt_bbox[:, 2] * tgt_bbox[:, 3]    # (N,) normalized area
+
+        # Pixel distance (in normalized space)
+        d_sq = ((pred_uv - tgt_uv) ** 2).sum(dim=-1)   # (N,) squared distance
+
+        # OKS: 1 - exp(-d² / 2·s²·k²)
+        # k=0.1 as in YOLO-6D-Pose paper
+        k_sq    = 0.1 ** 2
+        s_sq    = bbox_area.clamp(min=1e-6)             # guard against zero area
+        oks     = torch.exp(-d_sq / (2 * s_sq * k_sq)) # (N,) ∈ (0, 1]
+        loss    = (1 - oks).sum() / max(num_boxes, 1)
+
+        return {'loss_keypoint': loss}
     # L1 Loss for translation in x,y in meters
     def loss_trans_xy(self, 
                       outputs, 
@@ -1186,7 +1218,7 @@ class SetCriterion(nn.Module):
                       indices,
                       num_boxes,
                       lambda_geo: float = 1.0,
-                      lambda_add: float = 0.5):
+                      lambda_add: float = 0.0):
         """
         Rotation loss with symmetric / non-symmetric branching.
 
@@ -1246,12 +1278,14 @@ class SetCriterion(nn.Module):
             cos_ang = ((trace - 1.0) / 2.0).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
             loss_geo = torch.acos(cos_ang).sum()                            # scalar
 
-            # ADD — 1-to-1 mean point distance
-            pts_p_asym = torch.bmm(R_p_asym, pts_asym.transpose(1, 2)).transpose(1, 2) \
-                        + t_p_asym.unsqueeze(1)                            # (A, P, 3)
-            pts_g_asym = torch.bmm(R_g_asym, pts_asym.transpose(1, 2)).transpose(1, 2) \
-                        + t_g_asym.unsqueeze(1)                            # (A, P, 3)
-            loss_add   = (pts_p_asym - pts_g_asym).norm(dim=-1).mean(dim=-1).sum()  # scalar
+            if lambda_add >= 0.1:
+                # ADD — 1-to-1 mean point distance
+                pts_p_asym = torch.bmm(R_p_asym, pts_asym.transpose(1, 2)).transpose(1, 2) \
+                            + t_p_asym.unsqueeze(1)                            # (A, P, 3)
+                pts_g_asym = torch.bmm(R_g_asym, pts_asym.transpose(1, 2)).transpose(1, 2) \
+                            + t_g_asym.unsqueeze(1)                            # (A, P, 3)
+                loss_add = (pts_p_asym - pts_g_asym).norm(dim=-1).mean(dim=-1).sum()  # scalar
+
 
         # -----------------------------------------------------------
         # SYMMETRIC: ADD-S only
@@ -1342,7 +1376,8 @@ class SetCriterion(nn.Module):
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
             # 6D representation with L1 loss (YOLOX6D Approach)
             #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
-            loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
+            #loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
+            loss_kpt_dict = self.loss_keypoint_oks(outputs, targets, indices, num_boxes)
             loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
             

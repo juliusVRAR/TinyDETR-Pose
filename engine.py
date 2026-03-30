@@ -48,6 +48,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     print_freq = 10
     start_steps=epoch * num_training_steps_per_epoch
 
+    def set_loss_weight(loss_name: str, value: float):
+        for key in list(criterion.weight_dict.keys()):
+            if key == loss_name or key.startswith(f'{loss_name}_'):
+                criterion.weight_dict[key] = value
+
     for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         it = start_steps + data_iter_step
         if 'dp' in schedules:
@@ -126,21 +131,21 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             # Pose heads are randomly initialized — rotation predictions are garbage
             # Suppress rotation so corrupted geodesic gradients don't poison early training
             # Let keypoints and Z stabilize first since they're simpler to learn
-            criterion.weight_dict['loss_rot']      = args.rot_loss_coef * 0.1   # suppressed
-            criterion.weight_dict['loss_keypoint'] = args.keypoint_loss_coef    # full — stabilizes 2D
-            criterion.weight_dict['loss_trans_z']  = args.trans_z_loss_coef     # full — independent of rot
+            set_loss_weight('loss_rot', args.rot_loss_coef * 0.1)
+            set_loss_weight('loss_keypoint', args.keypoint_loss_coef)
+            set_loss_weight('loss_trans_z', args.trans_z_loss_coef)
 
         else:
             # Matching is stable, keypoints converging — give rotation full signal
-            criterion.weight_dict['loss_rot']      = args.rot_loss_coef         # full
-            criterion.weight_dict['loss_keypoint'] = args.keypoint_loss_coef    # full
-            criterion.weight_dict['loss_trans_z']  = args.trans_z_loss_coef     # full
+            set_loss_weight('loss_rot', args.rot_loss_coef)
+            set_loss_weight('loss_keypoint', args.keypoint_loss_coef)
+            set_loss_weight('loss_trans_z', args.trans_z_loss_coef)
         # TODO: Reduce detection loss coeffs in later training stages.
         # Currently set to a very high epoch number to disable this.
         if epoch >= args.reduce_det_loss_epochs:
-            criterion.weight_dict['loss_ce'] = args.cls_loss_coef * 0.5
-            criterion.weight_dict['loss_bbox'] = args.bbox_loss_coef * 0.5
-            criterion.weight_dict['loss_giou'] = args.giou_loss_coef * 0.5
+            set_loss_weight('loss_ce', args.cls_loss_coef * 0.5)
+            set_loss_weight('loss_bbox', args.bbox_loss_coef * 0.5)
+            set_loss_weight('loss_giou', args.giou_loss_coef * 0.5)
         
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
@@ -375,7 +380,7 @@ def pose_evaluate(model,
     print("Start Calculating ADD")
     results_add = pose_evaluator.evaluate_pose_add(output_eval_dir)
 
-    print("Start Calculating ADD-S")
+    print("Start Calculating ADI")
     results_adi= pose_evaluator.evaluate_pose_adi(output_eval_dir)
 
     print("Start Calculating ADD(-S)")
@@ -389,7 +394,7 @@ def pose_evaluate(model,
     print("Evaluation time: {}".format(total_time_str))
     print("Evaluation Results:")
     print(f"ADD (add): {results_add}")
-    print(f"ADD-S (adi): {results_adi}")
+    print(f"ADI: {results_adi}")
     print(f"ADD(-S) (adds): {results_adds}")
     print(f"Average Translation Error: {results_avg_translation_error}")
     print(f"Average Rotation Error: {results_avg_rotation_error}")
@@ -397,12 +402,12 @@ def pose_evaluate(model,
     log_file = open(output_eval_dir + "results_overview.log", 'w')
     log_file.write("Evaluation Results:\n")
     log_file.write(f"ADD (add): {results_add}\n")
-    log_file.write(f"ADD-S (adi): {results_adi}\n")
+    log_file.write(f"ADI: {results_adi}\n")
     log_file.write(f"ADD(-S) (adds): {results_adds}\n")
     log_file.write(f"Average Translation Error: {results_avg_translation_error}\n")
     log_file.write(f"Average Rotation Error: {results_avg_rotation_error}\n")
     log_file.close()
-    return results_add, results_adi, results_adds, results_avg_translation_error, results_avg_rotation_error # ADD, ADD-S, ADD(-S), Avg Translation Error, Avg Rotation Error
+    return results_add, results_adi, results_adds, results_avg_translation_error, results_avg_rotation_error # ADD, ADI, ADD(-S), Avg Translation Error, Avg Rotation Error
 
 @torch.no_grad()
 def bop_evaluate(model, matcher, data_loader, image_set, bbox_mode, rotation_mode, device, output_dir):

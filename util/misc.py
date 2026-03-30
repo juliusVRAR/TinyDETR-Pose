@@ -382,7 +382,7 @@ def round_up(value: int, multiple: int) -> int:
 def nested_tensor_from_tensor_list(
     tensor_list: List[torch.Tensor],
     meta_list=None,
-    orig_size: Optional[Tuple[int, int]] = (480, 640),  # (orig_h, orig_w)
+    orig_size: Optional[Tuple[int, int]] = None,
 ):
     # TODO make this more general
     if tensor_list[0].ndim == 3:
@@ -408,19 +408,14 @@ def nested_tensor_from_tensor_list(
         device = tensor_list[0].device
         tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
         mask = torch.ones((b, h, w), dtype=torch.bool, device=device)
-        if orig_size is not None:
-            orig_h, orig_w = orig_size
-        else:
-            orig_h = orig_w = None
         for img, pad_img, m in zip(tensor_list, tensor, mask):
             # copy image into batch tensor
             pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
 
-            if orig_h is not None and orig_w is not None \
-               and img.shape[1] >= orig_h and img.shape[2] >= orig_w:
+            if orig_size is not None:
+                orig_h, orig_w = orig_size
                 m[:orig_h, :orig_w] = False
             else:
-                # Fallback: treat the whole img area as valid
                 m[: img.shape[1], : img.shape[2]] = False
     else:
         raise ValueError('not supported') #
