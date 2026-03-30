@@ -1218,7 +1218,8 @@ class SetCriterion(nn.Module):
                       indices,
                       num_boxes,
                       lambda_geo: float = 1.0,
-                      lambda_add: float = 0.0):
+                      lambda_add: float = 0.0,
+                      lambda_adds: float = 0.0):
         """
         Rotation loss with symmetric / non-symmetric branching.
 
@@ -1290,20 +1291,21 @@ class SetCriterion(nn.Module):
         # -----------------------------------------------------------
         # SYMMETRIC: ADD-S only
         # -----------------------------------------------------------
-        if sym_mask.any():
-            R_p_sym = R_p[sym_mask]                         # (S, 3, 3)
-            R_g_sym = R_g[sym_mask]                         # (S, 3, 3)
-            t_p_sym = t_p[sym_mask]                         # (S, 3)
-            t_g_sym = t_g[sym_mask]                         # (S, 3)
-            pts_sym = pts[sym_mask]                         # (S, P, 3)
+        if lambda_adds >= 0.1:
+            if sym_mask.any():
+                R_p_sym = R_p[sym_mask]                         # (S, 3, 3)
+                R_g_sym = R_g[sym_mask]                         # (S, 3, 3)
+                t_p_sym = t_p[sym_mask]                         # (S, 3)
+                t_g_sym = t_g[sym_mask]                         # (S, 3)
+                pts_sym = pts[sym_mask]                         # (S, P, 3)
 
-            pts_p_sym = torch.bmm(R_p_sym, pts_sym.transpose(1, 2)).transpose(1, 2) \
-                        + t_p_sym.unsqueeze(1)              # (S, P, 3)
-            pts_g_sym = torch.bmm(R_g_sym, pts_sym.transpose(1, 2)).transpose(1, 2) \
-                        + t_g_sym.unsqueeze(1)              # (S, P, 3)
+                pts_p_sym = torch.bmm(R_p_sym, pts_sym.transpose(1, 2)).transpose(1, 2) \
+                            + t_p_sym.unsqueeze(1)              # (S, P, 3)
+                pts_g_sym = torch.bmm(R_g_sym, pts_sym.transpose(1, 2)).transpose(1, 2) \
+                            + t_g_sym.unsqueeze(1)              # (S, P, 3)
 
-            pairwise  = torch.cdist(pts_p_sym, pts_g_sym, p=2)             # (S, P, P)
-            loss_adds = pairwise.min(dim=2).values.mean(dim=1).sum()       # scalar
+                pairwise  = torch.cdist(pts_p_sym, pts_g_sym, p=2)             # (S, P, P)
+                loss_adds = pairwise.min(dim=2).values.mean(dim=1).sum()       # scalar
 
         # ── Aggregate & normalize ────────────────────────────────────────
         safe_num_boxes = max(num_boxes, 1)
@@ -1367,11 +1369,11 @@ class SetCriterion(nn.Module):
             lambda_rot = 1.0
 
             # Compute individual losses
-            #loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
+            loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
             loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
             # Geodensic Loss
-            #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            # loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
             # 6D representation with L1 loss (YOLOX6D Approach)
@@ -1382,7 +1384,7 @@ class SetCriterion(nn.Module):
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
             
             # Extract loss values
-            #loss_adds = loss_adds_dict['loss_adds']
+            loss_adds = loss_adds_dict['loss_adds']
             loss_rot = loss_rot_dict['loss_rot']
             #loss_trans = loss_trans_dict['loss_translation']
             loss_kpt = loss_kpt_dict['loss_keypoint']
@@ -1390,19 +1392,19 @@ class SetCriterion(nn.Module):
             loss_trans_z = loss_trans_z['loss_trans_z']
 
             # Total weighted pose loss
-            # loss_pose_total = (
-            #     lambda_adds * loss_adds +
-            #     lambda_rot * loss_rot +
-            #     lambda_kpt * loss_kpt +
-            #     lambda_trans_z * loss_trans_z +
-            #     lambda_trans_xy * loss_trans_xy
-            # )
             loss_pose_total = (
+                lambda_adds * loss_adds +
                 lambda_rot * loss_rot +
                 lambda_kpt * loss_kpt +
                 lambda_trans_z * loss_trans_z +
                 lambda_trans_xy * loss_trans_xy
             )
+            # loss_pose_total = (
+            #     lambda_rot * loss_rot +
+            #     lambda_kpt * loss_kpt +
+            #     lambda_trans_z * loss_trans_z +
+            #     lambda_trans_xy * loss_trans_xy
+            # )
             
             # Return all components for logging
             return {

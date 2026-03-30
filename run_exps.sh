@@ -3,7 +3,7 @@
 mail=julius.kuehn@igd.fraunhofer.de
 # run this with sh on an amperecontrol
 # Hardware 
-node=ampere4
+node=ampere2
 cpus=220
 ram=900G
 gpus=8
@@ -15,13 +15,13 @@ task='train'
 # Slurm reports land here
 slurm_out="$HOME/lw-detr6d/slurm_${task}_${model}"
 # Detection Loss config
-coef_clas=2.0
-coef_bbox=3.0
-coef_giou=1.0
+coef_clas=1.0
+coef_bbox=2.0
+coef_giou=0.5
 # Pose Loss config
-coef_adds=0.0 
-coef_kpt=1.0
-coef_rot=6.0
+coef_adds=1.0 
+coef_kpt=2.0
+coef_rot=4.0
 coef_trans_xy=0.0
 coef_trans_z=2.0
 #TODO: Derive jobname from config.
