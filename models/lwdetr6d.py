@@ -1113,7 +1113,7 @@ class SetCriterion(nn.Module):
         # Get symmetry flags [N_matched]
         is_symmetric = torch.cat(
             [t['is_symmetric'][i] for t, (_, i) in zip(targets, indices)], dim=0
-        )
+        ).bool()
         
         # Rotate model points with ground truth and predicted rotations
         # [N, 3, 3] @ [N, 3, M] -> [N, 3, M] -> [N, M, 3]
