@@ -1331,9 +1331,7 @@ class SetCriterion(nn.Module):
               indices,
               num_boxes):
         """
-        Complete pose loss from YOLO-6D-Pose paper (Equation 23):
-        
-        L_pose = λ_ADD(S) * L_ADD(S) + λ_rot * L_rot + λ_OKS * L_OKS + λ_ARD * L_ARD
+        Complete pose loss 
         
         Args:
             outputs: dict containing:
@@ -1364,23 +1362,25 @@ class SetCriterion(nn.Module):
             # You can also do this via the loss coefficients in the main training script
             lambda_adds = 1.0 
             lambda_kpt = 1.0
-            lambda_trans_xy = 1.0
+            # lambda_trans_xy = 1.0
             lambda_trans_z = 1.0
             lambda_rot = 1.0
 
             # Compute individual losses
+            # ADD(-S) Loss (Symmetry-aware point-to-point)
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
-            loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
             # Geodensic Loss
-            # loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
             # 6D representation with L1 loss (YOLOX6D Approach)
             #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
             #loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint_oks(outputs, targets, indices, num_boxes)
-            loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
+            # L1 loss for translation xy in meters.
+            #loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
             
             # Extract loss values
@@ -1388,7 +1388,7 @@ class SetCriterion(nn.Module):
             loss_rot = loss_rot_dict['loss_rot']
             #loss_trans = loss_trans_dict['loss_translation']
             loss_kpt = loss_kpt_dict['loss_keypoint']
-            loss_trans_xy = loss_trans_xy['loss_trans_xy']
+            #loss_trans_xy = loss_trans_xy['loss_trans_xy']
             loss_trans_z = loss_trans_z['loss_trans_z']
 
             # Total weighted pose loss
@@ -1396,8 +1396,8 @@ class SetCriterion(nn.Module):
                 lambda_adds * loss_adds +
                 lambda_rot * loss_rot +
                 lambda_kpt * loss_kpt +
-                lambda_trans_z * loss_trans_z +
-                lambda_trans_xy * loss_trans_xy
+                lambda_trans_z * loss_trans_z #+
+                #lambda_trans_xy * loss_trans_xy
             )
             # loss_pose_total = (
             #     lambda_rot * loss_rot +
@@ -1411,7 +1411,7 @@ class SetCriterion(nn.Module):
                 'loss_pose': loss_pose_total,
                 'loss_rot': loss_rot,
                 'loss_keypoint': loss_kpt,
-                'loss_trans_xy': loss_trans_xy,
+                #'loss_trans_xy': loss_trans_xy,
                 'loss_trans_z': loss_trans_z
             }
         else:
@@ -1560,8 +1560,8 @@ class SetCriterion(nn.Module):
             'labels': self.loss_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
-            #'translation': self.loss_translation,
             'pose': self.loss_pose,
+            #'translation': self.loss_translation,
             #'rotation': self.loss_rotation,
             #'rotation': self.loss_rot,
             #'adds': self.loss_adds,
@@ -1837,10 +1837,11 @@ def build(args):
     weight_dict = {'loss_ce': args.cls_loss_coef, 
                    'loss_bbox': args.bbox_loss_coef, 
                    'loss_giou': args.giou_loss_coef,
-                   'loss_trans_xy': args.trans_xy_loss_coef,
+                   #'loss_trans_xy': args.trans_xy_loss_coef,
                    'loss_trans_z': args.trans_z_loss_coef,
                    'loss_keypoint': args.keypoint_loss_coef,
-                   'loss_rot': args.rot_loss_coef
+                   'loss_rot': args.rot_loss_coef,
+                   'loss_adds': args.adds_loss_coef,
                    }
     
     # TODO this is a hack

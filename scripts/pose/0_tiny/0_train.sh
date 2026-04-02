@@ -13,7 +13,7 @@ COEF_CLAS=$7
 COEF_BBOX=$8
 COEF_GIOU=$9
 SLURM_JOB_ID=$10
-OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$SLURM_JOB_ID\_kpt_$COEF_KPT\_txy_$COEF_TRANS_XY\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT           
+OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$SLURM_JOB_ID\_kpt_$COEF_KPT\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS\_cls_$COEF_CLAS\_bbox_$COEF_BBOX\_giou_$COEF_GIOU           
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
@@ -23,7 +23,7 @@ python -u -m torch.distributed.launch \
                             --lr_encoder 1e-5 \
                             --lr_backbone 1e-6 \
                             --weight_decay 1e-4 \
-                            --lr_drop 70 \
+                            --lr_drop 80 \
                             --lr_vit_layer_decay 0.8 \
                             --lr_component_decay 0.7 \
                             --encoder vit_tiny \
@@ -57,7 +57,7 @@ python -u -m torch.distributed.launch \
                             --num_queries 50 \
                             --matcher_type "6d" \
                             --batch_size 16 \
-                            --n_mesh_points 1024 \
+                            --n_mesh_points 128 \
                             --keypoint_loss_coef $COEF_KPT \
                             --trans_z_loss_coef $COEF_TRANS_Z \
                             --trans_xy_loss_coef $COEF_TRANS_XY \
