@@ -211,10 +211,13 @@ class LWDETR6D(nn.Module):
         
         # Weights: Make them very small so output vectors are small numbers.
         # This prevents large initial rotations that confuse the matcher.
+        # (stable identity start)
+
         nn.init.xavier_uniform_(rot_layer.weight, gain=0.01)
-        
-        # Bias: Zero (Neutral)
-        nn.init.constant_(rot_layer.bias, 0.0)
+
+        # 6D identity: first two columns of I₃ = [1,0,0, 0,1,0]
+
+        rot_layer.bias.data = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
         # prior_prob = 0.01
         # bias_value = -math.log((1 - prior_prob) / prior_prob)
         # nn.init.constant_(self.class_head.bias, bias_value)
@@ -1371,6 +1374,9 @@ class SetCriterion(nn.Module):
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
             #loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
+            
+            # Symmetric Aware Rotation Loss derived from T6D.
+            loss_rot_dict = self.loss_rotation_sym_aware_T6D(outputs, targets, indices, num_boxes)
             # Geodensic Loss
             loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
