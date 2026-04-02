@@ -968,7 +968,7 @@ class SetCriterion(nn.Module):
         return {'loss_keypoint': loss_kpt}
     def loss_keypoint_oks(self, outputs, targets, indices, num_boxes):
         """
-        OKS-based center supervision — scale-aware, matches YOLO-6D-Pose.
+        OKS-based center supervision — scale-aware.
         Normalizes pixel error by object bounding box area.
         """
         idx = self._get_src_permutation_idx(indices)
@@ -1412,7 +1412,8 @@ class SetCriterion(nn.Module):
                 'loss_rot': loss_rot,
                 'loss_keypoint': loss_kpt,
                 #'loss_trans_xy': loss_trans_xy,
-                'loss_trans_z': loss_trans_z
+                'loss_trans_z': loss_trans_z,
+                "loss_adds": loss_adds,
             }
         else:
             return {}

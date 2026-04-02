@@ -13,7 +13,11 @@ COEF_CLAS=$7
 COEF_BBOX=$8
 COEF_GIOU=$9
 SLURM_JOB_ID=$10
-OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$SLURM_JOB_ID\_kpt_$COEF_KPT\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS\_cls_$COEF_CLAS\_bbox_$COEF_BBOX\_giou_$COEF_GIOU           
+
+timestamp() {
+  date +"%T-%Y-%m-%d" # current time
+}
+OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$SLURM_JOB_ID\_kpt_$COEF_KPT\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS\_cls_$COEF_CLAS\_bbox_$COEF_BBOX\_giou_$COEF_GIOU\_$(timestamp)           
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
