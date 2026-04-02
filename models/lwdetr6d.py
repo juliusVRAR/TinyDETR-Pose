@@ -812,7 +812,7 @@ class SetCriterion(nn.Module):
         losses = {}
         loss_rot = self.mae_loss(R_pred.view(-1, 6), R_tgt.view(-1, 6)).sum() / num_boxes
         #loss_rot = F.l1_loss(R_pred.view(-1, 6), R_tgt.view(-1, 6), reduction='mean')
-        losses["loss_rot"] = loss_rot / 6.0
+        losses["loss_rot"] = loss_rot
         return losses
     #### End My ADD-S and Rot loss.
 
@@ -1325,7 +1325,21 @@ class SetCriterion(nn.Module):
             'loss_rotation_add' : (loss_add  / safe_num_boxes).detach(),
             'loss_rotation_adds': (loss_adds / safe_num_boxes).detach(),
         }
+    # L1 on 6D rotation representation.
+    def loss_L1_rot_sym_aware(self, outputs, targets, indices, num_boxes):
+        idx = self._get_src_permutation_idx(indices)
+        src_rot = outputs["pred_rotations"][idx]
+        tgt_rot = torch.cat([t["relative_rotation"][i] 
+                            for t, (_, i) in zip(targets, indices)], dim=0)
+        is_sym = torch.cat([t['is_symmetric'][i] 
+                            for t, (_, i) in zip(targets, indices)], dim=0).bool()
 
+        R_pred = rotation_matrix_to_raw_6d(src_rot)
+        R_tgt = rotation_matrix_to_raw_6d(tgt_rot)
+
+        loss = F.l1_loss(R_pred, R_tgt, reduction='none').sum(dim=-1)  # (N,)
+        loss = torch.where(is_sym, torch.zeros_like(loss), loss)
+        return {'loss_rot': loss.sum() / num_boxes}
 
     # Put all pose losses together
     def loss_pose(self, 
@@ -1374,11 +1388,10 @@ class SetCriterion(nn.Module):
             loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
             #loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
-            
             # Symmetric Aware Rotation Loss derived from T6D.
             loss_rot_dict = self.loss_rotation_sym_aware_T6D(outputs, targets, indices, num_boxes)
             # Geodensic Loss
-            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
             # 6D representation with L1 loss (YOLOX6D Approach)
