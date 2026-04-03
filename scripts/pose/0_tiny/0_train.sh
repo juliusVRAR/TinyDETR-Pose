@@ -12,12 +12,16 @@ COEF_ADDS=$6
 COEF_CLAS=$7
 COEF_BBOX=$8
 COEF_GIOU=$9
-SLURM_JOB_ID=$10
+RUN_ID=${SLURM_JOB_ID:-$10}
+
+if [ -z "$RUN_ID" ]; then
+  RUN_ID=no_slurm_id
+fi
 
 timestamp() {
   date +"%T-%Y-%m-%d" # current time
 }
-OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$SLURM_JOB_ID\_kpt_$COEF_KPT\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS\_cls_$COEF_CLAS\_bbox_$COEF_BBOX\_giou_$COEF_GIOU\_$(timestamp)           
+OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$RUN_ID\_kpt_$COEF_KPT\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS\_cls_$COEF_CLAS\_bbox_$COEF_BBOX\_giou_$COEF_GIOU\_$(timestamp)           
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
@@ -27,7 +31,7 @@ python -u -m torch.distributed.launch \
                             --lr_encoder 1e-5 \
                             --lr_backbone 1e-6 \
                             --weight_decay 1e-4 \
-                            --lr_drop 80 \
+                            --lr_drop 50 \
                             --lr_vit_layer_decay 0.8 \
                             --lr_component_decay 0.7 \
                             --encoder vit_tiny \
@@ -56,7 +60,7 @@ python -u -m torch.distributed.launch \
                             --dataset_path $dataset_path \
                             --pretrained_encoder /workspace/LWDETR/data/weights/caev2_tiny_S_300e_objects365.pth \
                             --pretrain_weights /workspace/LWDETR/data/weights/LWDETR_tiny_30e_objects365.pth \
-                            --epochs 100 \
+                            --epochs 2 \
                             --num_select 100 \
                             --num_queries 50 \
                             --matcher_type "6d" \
@@ -72,6 +76,7 @@ python -u -m torch.distributed.launch \
                             --giou_loss_coef $COEF_GIOU \
                             --output_dir $OUTPUT_DIR \
                             --warm_up_epochs 0 \
-                            --quick_eval
+                            --quick_eval \
+                            --clip_max_norm 0.1
                              
                             

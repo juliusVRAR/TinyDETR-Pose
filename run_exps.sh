@@ -3,11 +3,11 @@
 mail=julius.kuehn@igd.fraunhofer.de
 # run this with sh on an amperecontrol
 # Hardware 
-node=ampere2
-cpus=220
-ram=900G
+node=ampere4
+cpus=200
+ram=700G
 gpus=8
-qos="normal"
+qos="idle"
 ###################################
 # Model options: tiny, small, medium, large, xlarge
 model='tiny'
@@ -15,13 +15,13 @@ task='train'
 # Slurm reports land here
 slurm_out="$HOME/lw-detr6d/slurm_${task}_${model}"
 # Detection Loss config
-coef_clas=1.0
-coef_bbox=2.0
-coef_giou=0.5
+coef_clas=2.0
+coef_bbox=3.0
+coef_giou=1.0
 # Pose Loss config
-coef_adds=1.0 
+coef_adds=3.0 
 coef_kpt=2.0
-coef_rot=4.0
+coef_rot=10.0
 coef_trans_xy=0.0
 coef_trans_z=2.0
 #TODO: Derive jobname from config.
