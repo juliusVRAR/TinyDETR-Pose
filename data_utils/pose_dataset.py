@@ -199,8 +199,19 @@ class PoseDataset(CocoDetection):
             cache_file = Path(cad_models_path) / f"mesh_points_n{self.n_mesh_points}_seed{mesh_point_seed}.pt"
             if cache_file.is_file():
                 data = torch.load(cache_file)
-                self._model_points = {int(k): v for k, v in data.items()}
-                self._model_points = {k: v / 1000. for k, v in self._model_points.items()}
+                self._model_points = {}
+                for key, points in data.items():
+                    if not torch.is_tensor(points):
+                        points = torch.as_tensor(points, dtype=torch.float32)
+                    else:
+                        points = points.to(dtype=torch.float32)
+
+                    # Older caches may store points in millimeters while newer caches
+                    # already store meters. Only rescale when the magnitude indicates mm.
+                    if points.numel() and points.abs().max().item() > 10.0:
+                        points = points / 1000.
+
+                    self._model_points[int(key)] = points
             else:
                 # Build list of mesh file paths keyed by class id
                 # Assumes models_info keys are object ids (e.g. "1","2",...) and
