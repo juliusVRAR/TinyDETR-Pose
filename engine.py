@@ -48,12 +48,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     print_freq = 10
     start_steps=epoch * num_training_steps_per_epoch
 
-    def set_loss_weight(loss_name: str, value: float):
-        for key in list(criterion.weight_dict.keys()):
-            if key == loss_name or key.startswith(f'{loss_name}_'):
-                criterion.weight_dict[key] = value
-
-    for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, 
+                                                                                print_freq, header)):
         it = start_steps + data_iter_step
         if 'dp' in schedules:
             if args.distributed:
@@ -128,24 +124,21 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         outputs = model(samples, targets)
 
         if epoch < args.warm_up_epochs:
-            # Pose heads are randomly initialized — rotation predictions are garbage
+            print(f"Epoch {epoch}: Warmup in progress.")
             # Suppress rotation so corrupted geodesic gradients don't poison early training
             # Let keypoints and Z stabilize first since they're simpler to learn
-            set_loss_weight('loss_rot', args.rot_loss_coef * 0.1)
-            set_loss_weight('loss_keypoint', args.keypoint_loss_coef)
-            set_loss_weight('loss_trans_z', args.trans_z_loss_coef)
+            criterion.weight_dict['loss_rot'] = args.rot_loss_coef * 0.1
 
         else:
+            print(f"Epoch {epoch}: Warmup complete.")
             # Matching is stable, keypoints converging — give rotation full signal
-            set_loss_weight('loss_rot', args.rot_loss_coef)
-            set_loss_weight('loss_keypoint', args.keypoint_loss_coef)
-            set_loss_weight('loss_trans_z', args.trans_z_loss_coef)
+            criterion.weight_dict['loss_rot'] = args.rot_loss_coef
         # TODO: Reduce detection loss coeffs in later training stages.
         # Currently set to a very high epoch number to disable this.
         if epoch >= args.reduce_det_loss_epochs:
-            set_loss_weight('loss_ce', args.cls_loss_coef * 0.5)
-            set_loss_weight('loss_bbox', args.bbox_loss_coef * 0.5)
-            set_loss_weight('loss_giou', args.giou_loss_coef * 0.5)
+            criterion.weight_dict['loss_ce'] = args.cls_loss_coef * 0.5
+            criterion.weight_dict['loss_bbox'] = args.bbox_loss_coef * 0.5
+            criterion.weight_dict['loss_giou'] = args.giou_loss_coef * 0.5
         
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
