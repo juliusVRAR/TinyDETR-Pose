@@ -12,7 +12,7 @@ COEF_ADDS=$6
 COEF_CLAS=$7
 COEF_BBOX=$8
 COEF_GIOU=$9
-RUN_ID=${SLURM_JOB_ID:-$10}
+RUN_ID=${10}
 
 if [ -z "$RUN_ID" ]; then
   RUN_ID=no_slurm_id
@@ -60,12 +60,12 @@ python -u -m torch.distributed.launch \
                             --dataset_path $dataset_path \
                             --pretrained_encoder /workspace/LWDETR/data/weights/caev2_tiny_S_300e_objects365.pth \
                             --pretrain_weights /workspace/LWDETR/data/weights/LWDETR_tiny_30e_objects365.pth \
-                            --epochs 2 \
+                            --epochs 80 \
                             --num_select 100 \
                             --num_queries 50 \
                             --matcher_type "6d" \
-                            --batch_size 16 \
-                            --n_mesh_points 128 \
+                            --batch_size 4 \
+                            --n_mesh_points 512 \
                             --keypoint_loss_coef $COEF_KPT \
                             --trans_z_loss_coef $COEF_TRANS_Z \
                             --trans_xy_loss_coef $COEF_TRANS_XY \
@@ -77,6 +77,5 @@ python -u -m torch.distributed.launch \
                             --output_dir $OUTPUT_DIR \
                             --warm_up_epochs 0 \
                             --quick_eval \
-                            --clip_max_norm 0.1
                              
                             
