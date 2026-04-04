@@ -124,13 +124,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         outputs = model(samples, targets)
 
         if epoch < args.warm_up_epochs:
-            print(f"Epoch {epoch}: Warmup in progress.")
             # Suppress rotation so corrupted geodesic gradients don't poison early training
             # Let keypoints and Z stabilize first since they're simpler to learn
             criterion.weight_dict['loss_rot'] = args.rot_loss_coef * 0.1
 
         else:
-            print(f"Epoch {epoch}: Warmup complete.")
+            
             # Matching is stable, keypoints converging — give rotation full signal
             criterion.weight_dict['loss_rot'] = args.rot_loss_coef
         # TODO: Reduce detection loss coeffs in later training stages.
