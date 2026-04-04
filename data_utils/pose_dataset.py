@@ -116,7 +116,7 @@ class PoseDataset(CocoDetection):
                  class_info=None,
                  sample_mesh_points = False, # Only true if we calulate symmetries because we have CAD model information
                  n_mesh_points=128, # The higher the more VRAM we need but the better the symmetry-aware loss works (T6D samples 1500 points)
-                 mesh_point_seed=0
+                 mesh_point_seed=42
                  ):
         """
         Args:
@@ -150,6 +150,7 @@ class PoseDataset(CocoDetection):
         self.coco = COCO(ann_file)
         self.mesh_point_seed = mesh_point_seed
         self.n_mesh_points = n_mesh_points
+        self._warned_missing_model_points = set()
         # Precompute diameter lookup (id -> float)
         self._diameters = {}
         for k, v in self.models_info.items():
@@ -232,6 +233,24 @@ class PoseDataset(CocoDetection):
                     self._model_points[int(obj_id)] = pts / 1000. # (N,3)
                 torch.save(self._model_points, cache_file)
 
+            if not self._model_points:
+                print(
+                    f"Warning: no CAD model points were loaded from {cad_models_path}. "
+                    "Rotation loss will collapse to zero and ADD-S will only supervise translation."
+                )
+            else:
+                tiny_point_ids = [
+                    obj_id for obj_id, pts in self._model_points.items()
+                    if pts.numel() and pts.abs().max().item() < 1e-4
+                ]
+                if tiny_point_ids:
+                    preview = tiny_point_ids[:5]
+                    print(
+                        f"Warning: tiny cached CAD point clouds detected for object ids {preview}. "
+                        f"This usually means a stale mesh cache was scaled twice. Delete {cache_file.name} "
+                        "and regenerate it."
+                    )
+
     def __getitem__(self, idx):
         img, target = super(PoseDataset, self).__getitem__(idx)
         if isinstance(img, torch.Tensor):
@@ -295,7 +314,12 @@ class PoseDataset(CocoDetection):
             for cid in labels.tolist():
                 pts = self._model_points.get(int(cid), None)
                 if pts is None:
-                    # Fallback: zero cloud
+                    if int(cid) not in self._warned_missing_model_points:
+                        print(
+                            f"Warning: missing CAD model points for class id {cid}. "
+                            "Using a zero cloud, which makes the rotation loss zero for those samples."
+                        )
+                        self._warned_missing_model_points.add(int(cid))
                     pts = torch.zeros(1, 3, dtype=torch.float32)
                 pts_list.append(pts)
             # Pad to same N if variable (optional). Here assume same N.
@@ -762,7 +786,17 @@ def build(image_set, args):
         "keyframes_bop": (root, root / "annotations"/ f'keyframes_bop.json'),
         "val": (root , root / "annotations" / f'val.json'),
     }
-    cad_model_path  = Path(root, "models")
+    if args.models:
+        cad_model_path = Path(str(root) + args.models)
+    else:
+        cad_model_path = Path(root, "models")
+
+    if not cad_model_path.exists():
+        fallback_cad_model_path = Path(root, "models")
+        if fallback_cad_model_path.exists():
+            print(f"CAD model path {cad_model_path} not found. Falling back to {fallback_cad_model_path}.")
+            cad_model_path = fallback_cad_model_path
+
     camera_intrinsics_file = Path(root,args.camera)
     # load intrinsics
     import json
