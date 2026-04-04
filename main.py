@@ -321,7 +321,7 @@ def get_args_parser():
                         help="rotation coefficient in the matching cost")
     parser.add_argument('--set_cost_translation', default=5., type=float,
                         help="translation coefficient in the matching cost")
-    parser.add_argument('--set_cost_keypoint', default=10., type=float,
+    parser.add_argument('--set_cost_keypoint', default=5., type=float,
                         help="keypoint coefficient in the matching cost")
     parser.add_argument('--matcher_type', default='6d', choices=['6d', 'hungarian', 'yopo'], type=str,
                         help="Type of matcher to use, hungarian is the 3d match from lwdetr and will probably not work")
