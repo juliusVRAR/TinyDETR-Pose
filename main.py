@@ -16,10 +16,12 @@ cleaned main file
 import argparse
 import datetime
 import json
+import inspect
 import random
 import time
 import ast
 import copy
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +38,198 @@ from util.utils import ModelEma, BestMetricHolder, clean_state_dict
 from util.benchmark import benchmark
 from evaluation_tools.pose_evaluator_init import build_pose_evaluator, build_better_pose_evaluator
 from torch.utils.tensorboard import SummaryWriter
+
+
+COCO_BBOX_METRIC_NAMES = (
+    'AP',
+    'AP50',
+    'AP75',
+    'AP_small',
+    'AP_medium',
+    'AP_large',
+    'AR_1',
+    'AR_10',
+    'AR_100',
+    'AR_small',
+    'AR_medium',
+    'AR_large',
+)
+def normalize_loss_weight_name(loss_name: str) -> str:
+    if loss_name.endswith('_enc'):
+        return loss_name[:-4]
+
+    base_name, separator, suffix = loss_name.rpartition('_')
+    if separator and suffix.isdigit():
+        return base_name
+
+    return loss_name
+
+
+def extract_criterion_loss_dispatch(criterion) -> dict:
+    try:
+        source = textwrap.dedent(inspect.getsource(type(criterion).get_loss))
+    except (OSError, TypeError):
+        return {}
+
+    tree = ast.parse(source)
+    dispatch = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name) or target.id != 'loss_map':
+                continue
+            if not isinstance(node.value, ast.Dict):
+                continue
+            for key_node, value_node in zip(node.value.keys, node.value.values):
+                if not isinstance(key_node, ast.Constant):
+                    continue
+                if not isinstance(value_node, ast.Attribute):
+                    continue
+                if not isinstance(value_node.value, ast.Name) or value_node.value.id != 'self':
+                    continue
+                dispatch[str(key_node.value)] = value_node.attr
+    return dispatch
+
+
+def extract_nested_loss_calls(method) -> list:
+    try:
+        source = textwrap.dedent(inspect.getsource(method))
+    except (OSError, TypeError):
+        return []
+
+    tree = ast.parse(source)
+    nested_losses = []
+    method_name = getattr(method, '__name__', '')
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        if not isinstance(node.func.value, ast.Name) or node.func.value.id != 'self':
+            continue
+        callee_name = node.func.attr
+        if not callee_name.startswith('loss_') or callee_name == method_name:
+            continue
+        nested_losses.append(callee_name)
+
+    return sorted(dict.fromkeys(nested_losses))
+
+
+def get_loss_configuration(args, criterion) -> dict:
+    dispatch = extract_criterion_loss_dispatch(criterion)
+    requested_losses = []
+    for loss_entry in getattr(criterion, 'losses', []):
+        entry = {'name': loss_entry}
+        implementation = dispatch.get(loss_entry)
+        if implementation is not None:
+            entry['implementation'] = implementation
+            method = getattr(type(criterion), implementation, None)
+            if method is not None:
+                nested_losses = extract_nested_loss_calls(method)
+                if nested_losses:
+                    entry['nested_losses'] = nested_losses
+        requested_losses.append(entry)
+
+    weighted_loss_terms = {}
+    for loss_name, weight in getattr(criterion, 'weight_dict', {}).items():
+        normalized_name = normalize_loss_weight_name(loss_name)
+        weighted_loss_terms.setdefault(normalized_name, float(weight))
+
+    return {
+        'requested_loss_entries': requested_losses,
+        'weighted_loss_terms': weighted_loss_terms,
+        'criterion_flags': {
+            'aux_loss': bool(args.aux_loss),
+            'sum_group_losses': bool(getattr(criterion, 'sum_group_losses', False)),
+            'use_varifocal_loss': bool(getattr(criterion, 'use_varifocal_loss', False)),
+            'use_position_supervised_loss': bool(getattr(criterion, 'use_position_supervised_loss', False)),
+            'ia_bce_loss': bool(getattr(criterion, 'ia_bce_loss', False)),
+        },
+        'training_behavior': {
+            'warm_up_epochs': args.warm_up_epochs,
+            'reduce_det_loss_epochs': args.reduce_det_loss_epochs,
+        },
+    }
+
+
+def append_summary_log(summary_log_path: Path, payload: dict) -> None:
+    summary_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with summary_log_path.open('a') as log_file:
+        log_file.write(json.dumps(payload, indent=2))
+        log_file.write('\n\n')
+
+
+def write_summary_run_config(summary_log_path: Path, args, criterion) -> None:
+    append_summary_log(summary_log_path, {
+        'event': 'run_config',
+        'timestamp': str(datetime.datetime.now()),
+        'dataset_file': args.dataset_file,
+        'train_set': args.train_set,
+        'eval_set': args.eval_set,
+        'loss_config': get_loss_configuration(args, criterion),
+        'evaluation_config': {
+            'eval_interval': args.eval_interval,
+            'quick_eval': args.quick_eval,
+            'skip_coco_eval': args.skip_coco_eval,
+            'skip_pose_eval': args.skip_pose_eval,
+        },
+    })
+
+
+def build_coco_eval_summary(test_stats: dict, image_set: str, phase: str, epoch=None,
+                            eval_name: str = 'coco') -> dict:
+    metrics = {}
+    if 'loss' in test_stats:
+        metrics['loss'] = float(test_stats['loss'])
+    if 'class_error' in test_stats:
+        metrics['class_error'] = float(test_stats['class_error'])
+
+    bbox_stats = test_stats.get('coco_eval_bbox')
+    if bbox_stats is not None:
+        bbox_values = [float(value) for value in bbox_stats]
+        metrics['bbox'] = {
+            name: value for name, value in zip(COCO_BBOX_METRIC_NAMES, bbox_values)
+        }
+
+    summary = {
+        'event': 'evaluation',
+        'timestamp': str(datetime.datetime.now()),
+        'phase': phase,
+        'eval_type': eval_name,
+        'image_set': image_set,
+        'metrics': metrics,
+    }
+    if epoch is not None:
+        summary['epoch'] = epoch
+        summary['epoch_1based'] = epoch + 1
+    return summary
+
+
+def build_pose_eval_summary(add_score: float, adi_score: float, adds_score: float,
+                            avg_translation_error: float, avg_rotation_error: float,
+                            image_set: str, bbox_mode: str, phase: str,
+                            quick_mode: bool, epoch=None) -> dict:
+    summary = {
+        'event': 'evaluation',
+        'timestamp': str(datetime.datetime.now()),
+        'phase': phase,
+        'eval_type': 'pose',
+        'image_set': image_set,
+        'bbox_mode': bbox_mode,
+        'quick_mode': quick_mode,
+        'metrics': {
+            'ADD': float(add_score),
+            'ADI': float(adi_score),
+            'ADD_minus_S': float(adds_score),
+            'avg_translation_error': float(avg_translation_error),
+            'avg_rotation_error': float(avg_rotation_error),
+        },
+    }
+    if epoch is not None:
+        summary['epoch'] = epoch
+        summary['epoch_1based'] = epoch + 1
+    return summary
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
@@ -440,6 +634,9 @@ def main(args):
         ema_m = ModelEma(model_without_ddp)
 
     output_dir = Path(args.output_dir)
+    summary_log_path = output_dir / 'summary.log' if args.output_dir else None
+    if summary_log_path is not None and utils.is_main_process():
+        write_summary_run_config(summary_log_path, args, criterion)
     
     if  utils.is_main_process():
         print("Get benchmark")
@@ -466,6 +663,8 @@ def main(args):
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
 
+    eval_epoch = checkpoint['epoch'] if args.resume else None
+
     test_stats, coco_evaluator = {}, None
     if args.eval and not args.pose_eval_only:
         if args.skip_coco_eval:
@@ -476,19 +675,39 @@ def main(args):
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args)
             if args.output_dir:
                 utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
-    eval_epoch = checkpoint['epoch'] if args.resume else None
+            if summary_log_path is not None and utils.is_main_process():
+                append_summary_log(
+                    summary_log_path,
+                    build_coco_eval_summary(test_stats, args.eval_set, phase='eval_only', epoch=eval_epoch),
+                )
     
     if args.eval or args.pose_eval_only:
         print("Pose Eval.")
         if utils.is_main_process():
             pose_loader = data_loader_pose_val if data_loader_pose_val is not None else data_loader_val
-            pose_evaluate(model=model, 
+            pose_eval_results = pose_evaluate(model=model, 
                         matcher=matcher, 
                         pose_evaluator=pose_evaluator,
                         data_loader=pose_loader, 
                         image_set=args.eval_set, bbox_mode=args.bbox_mode,
                         quick_mode=args.quick_eval, 
                         device=device, output_dir=args.output_dir, epoch=eval_epoch)
+            if summary_log_path is not None:
+                append_summary_log(
+                    summary_log_path,
+                    build_pose_eval_summary(
+                        pose_eval_results[0],
+                        pose_eval_results[1],
+                        pose_eval_results[2],
+                        pose_eval_results[3],
+                        pose_eval_results[4],
+                        args.eval_set,
+                        args.bbox_mode,
+                        phase='eval_only',
+                        quick_mode=args.quick_eval,
+                        epoch=eval_epoch,
+                    ),
+                )
         if args.distributed:
             torch.distributed.barrier()
         return
@@ -583,6 +802,11 @@ def main(args):
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args=args
             )
+            if summary_log_path is not None and utils.is_main_process():
+                append_summary_log(
+                    summary_log_path,
+                    build_coco_eval_summary(test_stats, args.eval_set, phase='train', epoch=epoch),
+                )
         if args.resume:
             eval_epoch = checkpoint['epoch']
         else:
@@ -636,6 +860,22 @@ def main(args):
                         },
                         "checkpoint_best_adds.pth",
                     )
+                if summary_log_path is not None:
+                    append_summary_log(
+                        summary_log_path,
+                        build_pose_eval_summary(
+                            current_add_score,
+                            current_adi_score,
+                            current_adds_score,
+                            current_avg_translation_error,
+                            current_avg_rotation_error,
+                            args.eval_set,
+                            args.bbox_mode,
+                            phase='train',
+                            quick_mode=quick_mode,
+                            epoch=epoch,
+                        ),
+                    )
             if args.distributed:
                 torch.distributed.barrier()
         if writer:
@@ -670,6 +910,17 @@ def main(args):
             ema_test_stats, _ = evaluate(
                 ema_m.module, criterion, postprocessors, data_loader_val, base_ds, device, args=args
             )
+            if summary_log_path is not None and utils.is_main_process():
+                append_summary_log(
+                    summary_log_path,
+                    build_coco_eval_summary(
+                        ema_test_stats,
+                        args.eval_set,
+                        phase='train_ema',
+                        epoch=epoch,
+                        eval_name='coco_ema',
+                    ),
+                )
         if args.resume:
             eval_epoch = checkpoint['epoch']
         else:
