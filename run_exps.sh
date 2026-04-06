@@ -3,9 +3,9 @@
 mail=julius.kuehn@igd.fraunhofer.de
 # run this with sh on an amperecontrol
 # Hardware 
-node=ampere4
-cpus=200
-ram=700G
+node=ampere3
+cpus=240
+ram=900G
 gpus=8
 qos="idle"
 ###################################
@@ -25,7 +25,7 @@ coef_rot=10.0
 coef_trans_xy=0.0
 coef_trans_z=2.0
 #TODO: Derive jobname from config.
-job_name="${task}_${model}_a_${coef_adds}_kpt_${coef_kpt}_r_${coef_rot}_yx_${coef_trans_xy}_z_${coef_trans_z}"
+job_name="${task}_${model}_opt_a_wu_dec_det_1024"
 # Check if path exists (file or directory)
 if [ -e $slurm_out ]; then
     echo "Path $slurm_out exists"

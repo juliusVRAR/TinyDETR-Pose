@@ -13,6 +13,7 @@ COEF_CLAS=$7
 COEF_BBOX=$8
 COEF_GIOU=$9
 RUN_ID=${10}
+JOB_NAME=${11}
 
 if [ -z "$RUN_ID" ]; then
   RUN_ID=no_slurm_id
@@ -21,7 +22,7 @@ fi
 timestamp() {
   date +"%T-%Y-%m-%d" # current time
 }
-OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$RUN_ID\_kpt_$COEF_KPT\_tz_$COEF_TRANS_Z\_rot_$COEF_ROT\_adds_$COEF_ADDS\_cls_$COEF_CLAS\_bbox_$COEF_BBOX\_giou_$COEF_GIOU\_$(timestamp)           
+OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$RUN_ID/\_$JOB_NAME\_$(timestamp)           
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
@@ -64,8 +65,8 @@ python -u -m torch.distributed.launch \
                             --num_select 100 \
                             --num_queries 50 \
                             --matcher_type "6d" \
-                            --batch_size 4 \
-                            --n_mesh_points 512 \
+                            --batch_size 1 \
+                            --n_mesh_points 1024 \
                             --keypoint_loss_coef $COEF_KPT \
                             --trans_z_loss_coef $COEF_TRANS_Z \
                             --trans_xy_loss_coef $COEF_TRANS_XY \
@@ -75,7 +76,8 @@ python -u -m torch.distributed.launch \
                             --bbox_loss_coef $COEF_BBOX \
                             --giou_loss_coef $COEF_GIOU \
                             --output_dir $OUTPUT_DIR \
-                            --warm_up_epochs 0 \
+                            --warm_up_epochs 1 \
                             --quick_eval \
+                            --reduce_det_loss_epochs 60
                              
                             
