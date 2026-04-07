@@ -30,6 +30,10 @@ from evaluation_tools.metrics import get_src_permutation_idx, calc_rotation_erro
 from util.rotation_utils import rotation_6d_to_matrix
 DEBUG = False
 DEBUG_OUT=Path("debug")
+def format_metric_value(value):
+    if value is None:
+        return 'N/A'
+    return f'{float(value)}'
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -384,26 +388,41 @@ def pose_evaluate(model,
     print("Start Calculating Average Translation Error")
     results_avg_translation_error = pose_evaluator.calculate_class_avg_translation_error(output_eval_dir)
     print("Start Calculating Average Rotation Error")
-    results_avg_rotation_error = pose_evaluator.calculate_class_avg_rotation_error(output_eval_dir)
+    rotation_error_metrics = pose_evaluator.calculate_class_avg_rotation_error(output_eval_dir)
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("Evaluation time: {}".format(total_time_str))
+
+    pose_metrics = {
+        'ADD': results_add,
+        'ADI': results_adi,
+        'ADD_minus_S': results_adds,
+        'avg_translation_error': results_avg_translation_error,
+        'avg_rotation_error': rotation_error_metrics.get('naive_all'),
+        'avg_rotation_error_symmetry_aware': rotation_error_metrics.get('symmetry_aware'),
+        'avg_rotation_error_nonsymmetric_only': rotation_error_metrics.get('nonsymmetric_only'),
+    }
+
     print("Evaluation Results:")
-    print(f"ADD (add): {results_add}")
-    print(f"ADI: {results_adi}")
-    print(f"ADD(-S) (adds): {results_adds}")
-    print(f"Average Translation Error: {results_avg_translation_error}")
-    print(f"Average Rotation Error: {results_avg_rotation_error}")
+    print(f"ADD (add): {pose_metrics['ADD']}")
+    print(f"ADI: {pose_metrics['ADI']}")
+    print(f"ADD(-S) (adds): {pose_metrics['ADD_minus_S']}")
+    print(f"Average Translation Error: {format_metric_value(pose_metrics['avg_translation_error'])}")
+    print(f"Average Rotation Error (Naive): {format_metric_value(pose_metrics['avg_rotation_error'])}")
+    print(f"Average Rotation Error (Symmetry-Aware): {format_metric_value(pose_metrics['avg_rotation_error_symmetry_aware'])}")
+    print(f"Average Rotation Error (Non-Symmetric Only): {format_metric_value(pose_metrics['avg_rotation_error_nonsymmetric_only'])}")
     
     log_file = open(output_eval_dir + "results_overview.log", 'w')
     log_file.write("Evaluation Results:\n")
-    log_file.write(f"ADD (add): {results_add}\n")
-    log_file.write(f"ADI: {results_adi}\n")
-    log_file.write(f"ADD(-S) (adds): {results_adds}\n")
-    log_file.write(f"Average Translation Error: {results_avg_translation_error}\n")
-    log_file.write(f"Average Rotation Error: {results_avg_rotation_error}\n")
+    log_file.write(f"ADD (add): {pose_metrics['ADD']}\n")
+    log_file.write(f"ADI: {pose_metrics['ADI']}\n")
+    log_file.write(f"ADD(-S) (adds): {pose_metrics['ADD_minus_S']}\n")
+    log_file.write(f"Average Translation Error: {format_metric_value(pose_metrics['avg_translation_error'])}\n")
+    log_file.write(f"Average Rotation Error (Naive): {format_metric_value(pose_metrics['avg_rotation_error'])}\n")
+    log_file.write(f"Average Rotation Error (Symmetry-Aware): {format_metric_value(pose_metrics['avg_rotation_error_symmetry_aware'])}\n")
+    log_file.write(f"Average Rotation Error (Non-Symmetric Only): {format_metric_value(pose_metrics['avg_rotation_error_nonsymmetric_only'])}\n")
     log_file.close()
-    return results_add, results_adi, results_adds, results_avg_translation_error, results_avg_rotation_error # ADD, ADI, ADD(-S), Avg Translation Error, Avg Rotation Error
+    return pose_metrics
 
 @torch.no_grad()
 def bop_evaluate(model, matcher, data_loader, image_set, bbox_mode, rotation_mode, device, output_dir):

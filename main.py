@@ -206,8 +206,13 @@ def build_coco_eval_summary(test_stats: dict, image_set: str, phase: str, epoch=
     return summary
 
 
-def build_pose_eval_summary(add_score: float, adi_score: float, adds_score: float,
-                            avg_translation_error: float, avg_rotation_error: float,
+def optional_float(value):
+    if value is None:
+        return None
+    return float(value)
+
+
+def build_pose_eval_summary(pose_metrics: dict,
                             image_set: str, bbox_mode: str, phase: str,
                             quick_mode: bool, epoch=None) -> dict:
     summary = {
@@ -219,11 +224,17 @@ def build_pose_eval_summary(add_score: float, adi_score: float, adds_score: floa
         'bbox_mode': bbox_mode,
         'quick_mode': quick_mode,
         'metrics': {
-            'ADD': float(add_score),
-            'ADI': float(adi_score),
-            'ADD_minus_S': float(adds_score),
-            'avg_translation_error': float(avg_translation_error),
-            'avg_rotation_error': float(avg_rotation_error),
+            'ADD': optional_float(pose_metrics.get('ADD')),
+            'ADI': optional_float(pose_metrics.get('ADI')),
+            'ADD_minus_S': optional_float(pose_metrics.get('ADD_minus_S')),
+            'avg_translation_error': optional_float(pose_metrics.get('avg_translation_error')),
+            'avg_rotation_error': optional_float(pose_metrics.get('avg_rotation_error')),
+            'avg_rotation_error_symmetry_aware': optional_float(
+                pose_metrics.get('avg_rotation_error_symmetry_aware')
+            ),
+            'avg_rotation_error_nonsymmetric_only': optional_float(
+                pose_metrics.get('avg_rotation_error_nonsymmetric_only')
+            ),
         },
     }
     if epoch is not None:
@@ -789,11 +800,7 @@ def main(args):
                 append_summary_log(
                     summary_log_path,
                     build_pose_eval_summary(
-                        pose_eval_results[0],
-                        pose_eval_results[1],
-                        pose_eval_results[2],
-                        pose_eval_results[3],
-                        pose_eval_results[4],
+                        pose_eval_results,
                         args.eval_set,
                         args.bbox_mode,
                         phase='eval_only',
@@ -910,8 +917,7 @@ def main(args):
                 # Keep scheduled validation cheap during training, but always run the final epoch in full.
                 quick_mode = args.quick_eval and (epoch + 1) != args.epochs
                 pose_loader = data_loader_pose_val if data_loader_pose_val is not None else data_loader_val
-                # ADD, ADI, ADD(-S)
-                current_add_score, current_adi_score, current_adds_score, current_avg_translation_error, current_avg_rotation_error = pose_evaluate(
+                pose_eval_results = pose_evaluate(
                     model=model,
                     matcher=matcher,
                     pose_evaluator=pose_evaluator,
@@ -924,6 +930,13 @@ def main(args):
                     epoch=epoch,
                     
                 )
+                current_add_score = pose_eval_results['ADD']
+                current_adi_score = pose_eval_results['ADI']
+                current_adds_score = pose_eval_results['ADD_minus_S']
+                current_avg_translation_error = pose_eval_results['avg_translation_error']
+                current_avg_rotation_error = pose_eval_results['avg_rotation_error']
+                current_avg_rotation_error_symmetry_aware = pose_eval_results['avg_rotation_error_symmetry_aware']
+                current_avg_rotation_error_nonsymmetric_only = pose_eval_results['avg_rotation_error_nonsymmetric_only']
                 print(f"Epoch {epoch} Validation ADD(-S): {current_adds_score:.2f}%")
 
                 # TensorBoard logging for pose metrics
@@ -931,8 +944,22 @@ def main(args):
                     writer.add_scalar("val/pose_ADD", current_add_score, epoch)
                     writer.add_scalar("val/pose_ADI", current_adi_score, epoch)
                     writer.add_scalar("val/pose_ADD_minus_S", current_adds_score, epoch)
-                    writer.add_scalar("val/pose_avg_translation_error", current_avg_translation_error, epoch)
-                    writer.add_scalar("val/pose_avg_rotation_error", current_avg_rotation_error, epoch)
+                    if current_avg_translation_error is not None:
+                        writer.add_scalar("val/pose_avg_translation_error", current_avg_translation_error, epoch)
+                    if current_avg_rotation_error is not None:
+                        writer.add_scalar("val/pose_avg_rotation_error", current_avg_rotation_error, epoch)
+                    if current_avg_rotation_error_symmetry_aware is not None:
+                        writer.add_scalar(
+                            "val/pose_avg_rotation_error_symmetry_aware",
+                            current_avg_rotation_error_symmetry_aware,
+                            epoch,
+                        )
+                    if current_avg_rotation_error_nonsymmetric_only is not None:
+                        writer.add_scalar(
+                            "val/pose_avg_rotation_error_nonsymmetric_only",
+                            current_avg_rotation_error_nonsymmetric_only,
+                            epoch,
+                        )
                 
                 # Save best model by the mixed ADD(-S) validation score.
                 if current_adds_score > best_adds_score:
@@ -957,11 +984,7 @@ def main(args):
                     append_summary_log(
                         summary_log_path,
                         build_pose_eval_summary(
-                            current_add_score,
-                            current_adi_score,
-                            current_adds_score,
-                            current_avg_translation_error,
-                            current_avg_rotation_error,
+                            pose_eval_results,
                             args.eval_set,
                             args.bbox_mode,
                             phase='train',

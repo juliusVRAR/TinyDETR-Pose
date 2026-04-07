@@ -18,6 +18,15 @@ import numpy as np
 from scipy.linalg import logm
 import numpy.linalg as LA
 
+from evaluation_tools.rotation_eval_utils import (
+    compute_rotation_error_summary,
+    compute_translation_error_summary,
+    safe_mean,
+    write_paper_rotation_metrics_csv,
+    write_paper_rotation_metrics_per_class_csv,
+    write_paper_translation_metrics_per_class_csv,
+)
+
 
 class PoseEvaluator(object):
     def __init__(self, models, classes, model_info, model_symmetry, depth_scale=0.1):
@@ -529,31 +538,26 @@ class PoseEvaluator(object):
         log_file.write('\n* {} *\n {:^}\n* {} *'.format('-' * 100, 'Metric Average Translation Error in Meters', '-' * 100))
         log_file.write("\n")
 
-        poses_pred = self.poses_pred
-        poses_gt = self.poses_gt
-        translation_errors = []
-        cls_translation_errors = {}
+        translation_summary = compute_translation_error_summary(
+            classes=self.classes,
+            poses_pred=self.poses_pred,
+            poses_gt=self.poses_gt,
+            models_info=self.models_info,
+            model_symmetry=self.model_symmetry,
+        )
         avg_translation_errors = {}
         for cls in self.classes:
-            cls_translation_errors[cls] = []
-            cls_poses_pred = poses_pred[cls]
-            cls_poses_gt = poses_gt[cls]
-            for pose_est, pose_gt in zip(cls_poses_pred, cls_poses_gt):
-                t_est = pose_est[:, 3]
-                t_gt = pose_gt[:, 3]
-                error = np.sqrt(np.sum(np.square((t_est - t_gt))))
-                cls_translation_errors[cls].append(error)
-                translation_errors.append(error)
-            if len(cls_translation_errors[cls]) != 0:
-                avg_error = np.sum(cls_translation_errors[cls]) / len(cls_translation_errors[cls])
-                avg_translation_errors[cls] = avg_error
-            else:
-                avg_translation_errors[cls] = np.nan
+            cls_summary = translation_summary['per_class'][cls]
+            avg_translation_errors[cls] = (
+                cls_summary['avg_translation_error_m']
+                if cls_summary['avg_translation_error_m'] is not None
+                else np.nan
+            )
             log_file.write("Class: {} \t\t {}".format(cls, avg_translation_errors[cls]))
             log_file.write("\n")
-        total_avg_error = np.sum(translation_errors) / len(translation_errors)
+        total_avg_error = translation_summary['overall']['mean']
         log_file.write("All:\t\t\t\t\t {}".format(total_avg_error))
-        avg_translation_errors["mean"] = [total_avg_error]
+        avg_translation_errors["mean"] = [total_avg_error] if total_avg_error is not None else []
 
         log_file.write("\n")
         log_file.close()
@@ -563,14 +567,20 @@ class PoseEvaluator(object):
                 [float(x) for x in v] if isinstance(v, list) else v)
             for k, v in avg_translation_errors.items()
         }
+        write_paper_translation_metrics_per_class_csv(output_dir, translation_summary)
         json.dump(avg_translation_errors, json_file)
         json_file.close()
-        return avg_translation_errors["mean"][0]
+        return total_avg_error
 
     def calculate_class_avg_rotation_error(self, output_path):
         """
-        Calculate the average rotation error given by the Geodesic distance for each class and then the average error
-        across all classes in degree
+        Calculate average rotation error metrics in degrees.
+
+        Returns:
+            dict with:
+                - naive_all: geodesic mean over all objects
+                - symmetry_aware: symmetry-aware geodesic mean
+                - nonsymmetric_only: geodesic mean excluding symmetric objects
         """
         output_dir = output_path + "/avg_rot_error/"
         if os.path.exists(output_dir):
@@ -584,51 +594,52 @@ class PoseEvaluator(object):
             '\n* {} *\n {:^}\n* {} *'.format('-' * 100, 'Metric Average Rotation Error in Degrees', '-' * 100))
         log_file.write("\n")
 
-        poses_pred = copy.deepcopy(self.poses_pred)
-        poses_gt = copy.deepcopy(self.poses_gt)
-        rotation_errors = []
-        cls_rotation_errors = {}
-        avg_rotation_errors = {}
+        rotation_summary = compute_rotation_error_summary(
+            classes=self.classes,
+            poses_pred=copy.deepcopy(self.poses_pred),
+            poses_gt=copy.deepcopy(self.poses_gt),
+            models_info=self.models_info,
+            model_symmetry=self.model_symmetry,
+        )
 
         for cls in self.classes:
-            cls_rotation_errors[cls] = []
-            cls_pose_pred = poses_pred[cls]
-            cls_pose_gt = poses_gt[cls]
-            for pose_est, pose_gt in zip(cls_pose_pred, cls_pose_gt):
-                rot_est = pose_est[:3, :3]
-                rot_gt = pose_gt[:3, :3]
-                rot = np.matmul(rot_est, rot_gt.T)
-                trace = np.trace(rot)
-                if trace < -1.0:
-                    trace = -1
-                elif trace > 3.0:
-                    trace = 3.0
-                angle_diff = np.degrees(np.arccos(0.5 * (trace - 1)))
-                cls_rotation_errors[cls].append(angle_diff)
-                rotation_errors.append(angle_diff)
-            if len(cls_rotation_errors[cls]) != 0:
-                avg_error = np.sum(cls_rotation_errors[cls]) / len(cls_rotation_errors[cls])
-                avg_rotation_errors[cls] = avg_error
-            else:
-                avg_rotation_errors[cls] = np.nan
-            log_file.write("Class: {} \t\t {}".format(cls, avg_rotation_errors[cls]))
+            cls_summary = rotation_summary['per_class'][cls]
+            log_file.write(
+                "Class: {} \t\t naive={} \t symmetry_aware={} \t symmetric={} \t n_poses={}".format(
+                    cls,
+                    cls_summary['naive'],
+                    cls_summary['symmetry_aware'],
+                    cls_summary['is_symmetric'],
+                    cls_summary['n_poses'],
+                )
+            )
             log_file.write("\n")
-        total_avg_error = np.sum(rotation_errors) / len(rotation_errors)
-        log_file.write("All:\t\t\t\t\t {}".format(total_avg_error))
-        avg_rotation_errors["mean"] = [total_avg_error]
+
+        overall = rotation_summary['overall']
+        log_file.write("All naive geodesic:\t\t {}".format(overall['naive_all']))
+        log_file.write("\n")
+        log_file.write("All symmetry-aware geodesic:\t {}".format(overall['symmetry_aware']))
+        log_file.write("\n")
+        log_file.write("Non-symmetric-only geodesic:\t {}".format(overall['nonsymmetric_only']))
+        log_file.write("\n")
+
+        avg_rotation_errors = {
+            'per_class': rotation_summary['per_class'],
+            'overall': overall,
+            'counts': rotation_summary['counts'],
+            'mean': [overall['naive_all']] if overall['naive_all'] is not None else [],
+            'symmetry_aware_mean': [overall['symmetry_aware']] if overall['symmetry_aware'] is not None else [],
+            'nonsymmetric_only_mean': [overall['nonsymmetric_only']] if overall['nonsymmetric_only'] is not None else [],
+        }
+        write_paper_rotation_metrics_csv(output_dir, rotation_summary)
+        write_paper_rotation_metrics_per_class_csv(output_dir, rotation_summary)
 
         log_file.write("\n")
         log_file.close()
 
-        avg_rotation_errors = {
-            k: (float(v) if isinstance(v, (np.floating,)) else
-                [float(x) for x in v] if isinstance(v, list) else v)
-            for k, v in avg_rotation_errors.items()
-        }
-
         json.dump(avg_rotation_errors, json_file)
         json_file.close()
-        return avg_rotation_errors["mean"][0]
+        return overall
 
     def se3_mul(self, RT1, RT2):
         """
@@ -765,7 +776,9 @@ class PoseEvaluator(object):
         rd_rad = LA.norm(temp, 'fro') / np.sqrt(2)
         rd_deg = rd_rad / np.pi * 180
         return rd_deg
+    
 
+    
 
 
 
