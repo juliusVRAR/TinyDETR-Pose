@@ -231,6 +231,72 @@ def build_pose_eval_summary(add_score: float, adi_score: float, adds_score: floa
         summary['epoch_1based'] = epoch + 1
     return summary
 
+
+def serialize_best_metric_single(metric) -> dict:
+    return {
+        'best_res': float(metric.best_res),
+        'best_ep': int(metric.best_ep),
+        'better': metric.better,
+        'init_res': float(metric.init_res),
+    }
+
+
+def serialize_best_metric_holder(best_metric_holder) -> dict:
+    if best_metric_holder is None:
+        return {}
+
+    state = {
+        'use_ema': bool(best_metric_holder.use_ema),
+        'best_all': serialize_best_metric_single(best_metric_holder.best_all),
+    }
+    if best_metric_holder.use_ema:
+        state['best_regular'] = serialize_best_metric_single(best_metric_holder.best_regular)
+        state['best_ema'] = serialize_best_metric_single(best_metric_holder.best_ema)
+    return state
+
+
+def restore_best_metric_single(metric, state: dict) -> None:
+    if not state:
+        return
+
+    if 'better' in state:
+        metric.better = state['better']
+    if 'init_res' in state:
+        metric.init_res = float(state['init_res'])
+    if 'best_res' in state:
+        metric.best_res = float(state['best_res'])
+    if 'best_ep' in state:
+        metric.best_ep = int(state['best_ep'])
+
+
+def restore_best_metric_holder(best_metric_holder, state: dict) -> None:
+    if not state:
+        return
+
+    restore_best_metric_single(best_metric_holder.best_all, state.get('best_all', {}))
+    if best_metric_holder.use_ema:
+        restore_best_metric_single(best_metric_holder.best_regular, state.get('best_regular', {}))
+        restore_best_metric_single(best_metric_holder.best_ema, state.get('best_ema', {}))
+
+
+def build_training_checkpoint(args, model_state: dict, optimizer, lr_scheduler, epoch: int,
+                              ema_m=None, best_metric_holder=None, best_adds_score: float = 0.0,
+                              extra_payload: dict | None = None) -> dict:
+    checkpoint = {
+        'model': model_state,
+        'optimizer': optimizer.state_dict(),
+        'lr_scheduler': lr_scheduler.state_dict(),
+        'epoch': epoch,
+        'args': args,
+        'best_map_holder': serialize_best_metric_holder(best_metric_holder),
+        'best_adds_score': float(best_adds_score),
+    }
+    if ema_m is not None:
+        checkpoint['ema_model'] = ema_m.module.state_dict()
+    if extra_payload:
+        checkpoint.update(extra_payload)
+    return checkpoint
+
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     # Learnining hyperparameters
@@ -498,6 +564,9 @@ def should_run_pose_eval(epoch: int, total_epochs: int, warmup_epochs: int) -> b
         return (e - warmup_epochs) % 10 == 0
 
 def main(args):
+    if args.eval_only:
+        args.eval = True
+
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
     print(args)
@@ -631,39 +700,63 @@ def main(args):
     #         ema_m = ModelEma(model_without_ddp)
     if args.use_ema:
         del ema_m
-        ema_m = ModelEma(model_without_ddp)
+        ema_m = ModelEma(model_without_ddp, decay=args.ema_decay)
 
     output_dir = Path(args.output_dir)
     summary_log_path = output_dir / 'summary.log' if args.output_dir else None
+    best_map_holder = BestMetricHolder(use_ema=args.use_ema)
+    best_adds_score = 0.0
     if summary_log_path is not None and utils.is_main_process():
         write_summary_run_config(summary_log_path, args, criterion)
+
+    is_training_run = not (args.eval or args.pose_eval_only or args.eval_bop)
+    resume_checkpoint = None
+    resume_epoch = None
     
-    if  utils.is_main_process():
+    if args.resume:
+        resume_checkpoint = torch.load(args.resume, map_location='cpu')
+        model_without_ddp.load_state_dict(clean_state_dict(resume_checkpoint['model']), strict=True)
+        resume_epoch = resume_checkpoint.get('epoch')
+        if resume_epoch is not None:
+            resume_epoch = int(resume_epoch)
+        if args.use_ema:
+            if 'ema_model' in resume_checkpoint:
+                ema_m.module.load_state_dict(clean_state_dict(resume_checkpoint['ema_model']))
+            else:
+                ema_m.set(model_without_ddp)
+        if is_training_run:
+            if 'optimizer' in resume_checkpoint:
+                optimizer.load_state_dict(resume_checkpoint['optimizer'])
+            else:
+                print('Warning: checkpoint missing optimizer state; resuming weights only.')
+
+            if 'lr_scheduler' in resume_checkpoint:
+                lr_scheduler.load_state_dict(resume_checkpoint['lr_scheduler'])
+            elif resume_epoch is not None:
+                lr_scheduler.last_epoch = resume_epoch
+                if hasattr(lr_scheduler, '_step_count'):
+                    lr_scheduler._step_count = resume_epoch + 1
+                if hasattr(lr_scheduler, '_last_lr'):
+                    lr_scheduler._last_lr = [group['lr'] for group in optimizer.param_groups]
+                print('Warning: checkpoint missing lr_scheduler state; reconstructed scheduler epoch from checkpoint.')
+
+            if resume_epoch is not None:
+                args.start_epoch = resume_epoch + 1
+
+            restore_best_metric_holder(best_map_holder, resume_checkpoint.get('best_map_holder', {}))
+            best_adds_score = float(resume_checkpoint.get('best_adds_score', resume_checkpoint.get('score', 0.0)))
+
+            if utils.is_main_process() and resume_epoch is not None:
+                print(f'Resumed training from checkpoint epoch {resume_epoch} (next epoch: {args.start_epoch}).')
+
+    if utils.is_main_process():
         print("Get benchmark")
         benchmark_model = copy.deepcopy(model_without_ddp)
         bm = benchmark(benchmark_model.float(), dataset_val, output_dir)
         print(json.dumps(bm, indent=2))
         del benchmark_model
-    
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
-        if args.use_ema:
-            if 'ema_model' in checkpoint:
-                ema_m.module.load_state_dict(clean_state_dict(checkpoint['ema_model']))
-            else:
-                del ema_m
-                ema_m = ModelEma(model) 
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            checkpoint['optimizer']["param_groups"] = optimizer.state_dict()["param_groups"]
-            checkpoint['lr_scheduler'].pop("step_size")
-            checkpoint['lr_scheduler'].pop("_last_lr")
-            
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
 
-    eval_epoch = checkpoint['epoch'] if args.resume else None
+    eval_epoch = resume_epoch
 
     test_stats, coco_evaluator = {}, None
     if args.eval and not args.pose_eval_only:
@@ -736,11 +829,10 @@ def main(args):
             args.drop_path, args.epochs, num_training_steps_per_epoch,
             args.cutoff_epoch, args.drop_mode, args.drop_schedule)
         print("Min DP = %.7f, Max DP = %.7f" % (min(schedules['dp']), max(schedules['dp'])))
-    assert args.start_epoch - args.epochs !=0, "start_epoch should be less than epochs"
+    if args.start_epoch >= args.epochs:
+        raise ValueError(f"start_epoch ({args.start_epoch}) should be less than epochs ({args.epochs})")
     print("Start training")
     start_time = time.time()
-    best_map_holder = BestMetricHolder(use_ema=args.use_ema)
-    best_adds_score = 0.0
     if args.skip_coco_eval and utils.is_main_process():
         print("Skipping COCO eval during training (--skip_coco_eval).")
     for epoch in range(args.start_epoch, args.epochs):
@@ -776,25 +868,6 @@ def main(args):
         train_epoch_time_str = str(datetime.timedelta(seconds=int(train_epoch_time)))
         
         lr_scheduler.step()
-        
-        if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            # extra checkpoint before LR drop and every `checkpoint_interval` epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.checkpoint_interval == 0:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}_new.pth')
-            for checkpoint_path in checkpoint_paths:
-                weights = {
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }
-                if args.use_ema:
-                    weights.update({
-                        'ema_model': ema_m.module.state_dict(),
-                    })
-                utils.save_on_master(weights, checkpoint_path)
 
         if args.skip_coco_eval:
             test_stats, coco_evaluator = {}, None
@@ -807,10 +880,24 @@ def main(args):
                     summary_log_path,
                     build_coco_eval_summary(test_stats, args.eval_set, phase='train', epoch=epoch),
                 )
-        if args.resume:
-            eval_epoch = checkpoint['epoch']
-        else:
-            eval_epoch = None
+            if 'coco_eval_bbox' in test_stats:
+                map_regular = test_stats['coco_eval_bbox'][0]
+                is_best_regular = best_map_holder.update(map_regular, epoch, is_ema=False)
+                if is_best_regular and args.output_dir:
+                    checkpoint_path = output_dir / 'checkpoint_best_regular.pth'
+                    utils.save_on_master(
+                        build_training_checkpoint(
+                            args,
+                            model_without_ddp.state_dict(),
+                            optimizer,
+                            lr_scheduler,
+                            epoch,
+                            ema_m=ema_m if args.use_ema else None,
+                            best_metric_holder=best_map_holder,
+                            best_adds_score=best_adds_score,
+                        ),
+                        checkpoint_path,
+                    )
         
         # Adaptive pose evaluation schedule
         run_pose_eval = (
@@ -851,14 +938,20 @@ def main(args):
                 if current_adds_score > best_adds_score:
                     best_adds_score = current_adds_score
                     print("🚀 New Best Model found! Saving checkpoint...")
-                    torch.save(
-                        {
-                            'model': model.state_dict(),
-                            'optimizer': optimizer.state_dict(),
-                            'epoch': epoch,
-                            'score': best_adds_score,
-                        },
-                        "checkpoint_best_adds.pth",
+                    checkpoint_path = output_dir / 'checkpoint_best_adds.pth' if args.output_dir else Path('checkpoint_best_adds.pth')
+                    utils.save_on_master(
+                        build_training_checkpoint(
+                            args,
+                            model_without_ddp.state_dict(),
+                            optimizer,
+                            lr_scheduler,
+                            epoch,
+                            ema_m=ema_m if args.use_ema else None,
+                            best_metric_holder=best_map_holder,
+                            best_adds_score=best_adds_score,
+                            extra_payload={'score': float(best_adds_score)},
+                        ),
+                        checkpoint_path,
                     )
                 if summary_log_path is not None:
                     append_summary_log(
@@ -887,25 +980,7 @@ def main(args):
                 elif isinstance(v, (int, float)):
                     writer.add_scalar(f"val/{k}", v, epoch)
 
-    if writer:
-        writer.close()
-        if not args.skip_coco_eval and 'coco_eval_bbox' in test_stats:
-            map_regular = test_stats['coco_eval_bbox'][0]
-            _isbest = best_map_holder.update(map_regular, epoch, is_ema=False)
-            if _isbest:
-                checkpoint_path = output_dir / 'checkpoint_best_regular.pth'
-                utils.save_on_master({
-                    'model': model_without_ddp.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'lr_scheduler': lr_scheduler.state_dict(),
-                    'epoch': epoch,
-                    'args': args,
-                }, checkpoint_path)
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters,
-                     'skip_coco_eval': args.skip_coco_eval}
+        ema_test_stats = None
         if args.use_ema and not args.skip_coco_eval:
             ema_test_stats, _ = evaluate(
                 ema_m.module, criterion, postprocessors, data_loader_val, base_ds, device, args=args
@@ -921,48 +996,48 @@ def main(args):
                         eval_name='coco_ema',
                     ),
                 )
-        if args.resume:
-            eval_epoch = checkpoint['epoch']
-        else:
-            eval_epoch = None
-            #pose_evaluate(model, matcher, pose_evaluator, data_loader_val, args.eval_set, args.bbox_mode,
-             #         args.rotation_representation, device, args.output_dir, eval_epoch)
-            if args.use_ema and not args.skip_coco_eval:
-                log_stats.update({f'ema_test_{k}': v for k,v in ema_test_stats.items()})
+            if 'coco_eval_bbox' in ema_test_stats:
                 map_ema = ema_test_stats['coco_eval_bbox'][0]
-                _isbest = best_map_holder.update(map_ema, epoch, is_ema=True)
-                if _isbest:
+                is_best_ema = best_map_holder.update(map_ema, epoch, is_ema=True)
+                if is_best_ema and args.output_dir:
                     checkpoint_path = output_dir / 'checkpoint_best_ema.pth'
-                    utils.save_on_master({
-                        'model': ema_m.module.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'lr_scheduler': lr_scheduler.state_dict(),
-                        'epoch': epoch,
-                        'args': args,
-                    }, checkpoint_path)
+                    utils.save_on_master(
+                        build_training_checkpoint(
+                            args,
+                            ema_m.module.state_dict(),
+                            optimizer,
+                            lr_scheduler,
+                            epoch,
+                            ema_m=ema_m,
+                            best_metric_holder=best_map_holder,
+                            best_adds_score=best_adds_score,
+                        ),
+                        checkpoint_path,
+                    )
+
+        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                     **{f'test_{k}': v for k, v in test_stats.items()},
+                     'epoch': epoch,
+                     'n_parameters': n_parameters,
+                     'skip_coco_eval': args.skip_coco_eval}
+
+        if ema_test_stats is not None:
+            log_stats.update({f'ema_test_{k}': v for k, v in ema_test_stats.items()})
         if not args.skip_coco_eval:
             log_stats.update(best_map_holder.summary())
-        
-        # epoch parameters
-        ep_paras = {
-                'epoch': epoch,
-                'n_parameters': n_parameters
-            }
-        log_stats.update(ep_paras)
-        try:
-            log_stats.update({'now_time': str(datetime.datetime.now())})
-        except:
-            pass
-        log_stats['train_epoch_time'] = train_epoch_time_str
+
+        log_stats.update({
+            'now_time': str(datetime.datetime.now()),
+            'train_epoch_time': train_epoch_time_str,
+        })
         epoch_time = time.time() - epoch_start_time
         epoch_time_str = str(datetime.timedelta(seconds=int(epoch_time)))
         log_stats['epoch_time'] = epoch_time_str
-        
+
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-            # for evaluation logs
             if coco_evaluator is not None:
                 (output_dir / 'eval').mkdir(exist_ok=True)
                 if "bbox" in coco_evaluator.coco_eval:
@@ -972,6 +1047,28 @@ def main(args):
                     for name in filenames:
                         torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                    output_dir / "eval" / name)
+
+        if args.output_dir:
+            checkpoint_paths = [output_dir / 'checkpoint.pth']
+            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.checkpoint_interval == 0:
+                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}_new.pth')
+            for checkpoint_path in checkpoint_paths:
+                utils.save_on_master(
+                    build_training_checkpoint(
+                        args,
+                        model_without_ddp.state_dict(),
+                        optimizer,
+                        lr_scheduler,
+                        epoch,
+                        ema_m=ema_m if args.use_ema else None,
+                        best_metric_holder=best_map_holder,
+                        best_adds_score=best_adds_score,
+                    ),
+                    checkpoint_path,
+                )
+
+    if writer:
+        writer.close()
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
