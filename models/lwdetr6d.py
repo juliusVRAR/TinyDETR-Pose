@@ -214,10 +214,15 @@ class LWDETR6D(nn.Module):
         # (stable identity start)
 
         nn.init.xavier_uniform_(rot_layer.weight, gain=0.01)
-
+        ### Test if this performes better than 6d identity init.
+        
+        # Rotation Bias: Zero (Neutral)
+        #nn.init.constant_(rot_layer.bias, 0.0)
+        #print(">> Rotation Head initialized. Zero (Neutral).")
+        
         # 6D identity: first two columns of I₃ = [1,0,0, 0,1,0]
-
         rot_layer.bias.data = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        print(">> Rotation Head initialized to predict identity rotation (6D).")
         # prior_prob = 0.01
         # bias_value = -math.log((1 - prior_prob) / prior_prob)
         # nn.init.constant_(self.class_head.bias, bias_value)
@@ -226,6 +231,8 @@ class LWDETR6D(nn.Module):
         
         print(f">> Class Head initialized with bias -4.6 (Prob 0.01)")
         print(">> Pose Heads Initialized: Z-Uncertainty set high, XY centered.")
+        
+        
         
     def forward(self, samples: NestedTensor, targets = None):
         """ The forward expects a NestedTensor, which consists of:
