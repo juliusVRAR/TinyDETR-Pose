@@ -27,12 +27,12 @@ python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
                 /workspace/LWDETR/main.py \
-                            --lr 1e-4 \
+                            --lr 2e-4 \
                             --lr_transformer 2e-5 \
                             --lr_encoder 1e-5 \
                             --lr_backbone 1e-6 \
                             --weight_decay 1e-4 \
-                            --lr_drop 50 \
+                            --lr_drop 55 \
                             --lr_vit_layer_decay 0.8 \
                             --lr_component_decay 0.7 \
                             --encoder vit_tiny \
@@ -65,8 +65,8 @@ python -u -m torch.distributed.launch \
                             --num_select 100 \
                             --num_queries 50 \
                             --matcher_type "6d" \
-                            --batch_size 1 \
-                            --n_mesh_points 1024 \
+                            --batch_size 16 \
+                            --n_mesh_points 512 \
                             --keypoint_loss_coef $COEF_KPT \
                             --trans_z_loss_coef $COEF_TRANS_Z \
                             --trans_xy_loss_coef $COEF_TRANS_XY \
@@ -76,8 +76,8 @@ python -u -m torch.distributed.launch \
                             --bbox_loss_coef $COEF_BBOX \
                             --giou_loss_coef $COEF_GIOU \
                             --output_dir $OUTPUT_DIR \
-                            --warm_up_epochs 1 \
+                            --warm_up_epochs 0 \
                             --quick_eval \
-                            --reduce_det_loss_epochs 60
+                            --reduce_det_loss_epochs 50
                              
                             

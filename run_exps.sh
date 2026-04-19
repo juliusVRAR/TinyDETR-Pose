@@ -3,11 +3,11 @@
 mail=julius.kuehn@igd.fraunhofer.de
 # run this with sh on an amperecontrol
 # Hardware 
-node=ampere3
+node=ampere4
 cpus=240
 ram=900G
 gpus=8
-qos="idle"
+qos="normal" # idle, normal, priority
 ###################################
 # Model options: tiny, small, medium, large, xlarge
 model='tiny'
@@ -19,13 +19,13 @@ coef_clas=2.0
 coef_bbox=3.0
 coef_giou=1.0
 # Pose Loss config
-coef_adds=3.0 
+coef_adds=2.0 
 coef_kpt=2.0
-coef_rot=10.0
+coef_rot=1.0
 coef_trans_xy=0.0
 coef_trans_z=2.0
 #TODO: Derive jobname from config.
-job_name="${task}_${model}_opt_a_wu_dec_det_1024"
+job_name="${task}_${model}_opt_b_512_lr_2x"
 # Check if path exists (file or directory)
 if [ -e $slurm_out ]; then
     echo "Path $slurm_out exists"
