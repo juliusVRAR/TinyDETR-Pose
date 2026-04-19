@@ -9,6 +9,9 @@ import torch
 import torch.nn.functional as F
 from typing import Tuple
 import trimesh
+import json
+import numpy as np
+from pathlib import Path
 
 DEFAULT_ACOS_BOUND = 1.0 - 1e-4
 
@@ -550,3 +553,84 @@ def precompute_points(model_paths, n=1500, seed=0):
     """
     return {obj_id: load_model_points(path, n=n, seed=seed)
             for obj_id, path in model_paths.items()}
+
+
+YCBV_MISSING_CONTINUOUS = {
+    1: [0, 0, 1],   # 002_master_chef_can  (only discrete 180° in JSON)
+    4: [0, 0, 1],   # 005_tomato_soup_can  (nothing in JSON)
+    6: [0, 0, 1],   # 007_tuna_fish_can    (nothing in JSON)
+}
+
+
+def build_symmetry_transforms(cad_models_path, K_continuous=360,
+                               missing_continuous=None):
+    models_info_path = Path(cad_models_path) / "models_info.json"
+    with open(models_info_path, 'r') as f:
+        models_info = json.load(f)
+
+    if missing_continuous is None:
+        missing_continuous = YCBV_MISSING_CONTINUOUS
+
+    sym_dict = {}
+
+    for obj_id_str, info in models_info.items():
+        obj_id = int(obj_id_str)
+        rots = [torch.eye(3)]
+
+        # --- Discrete symmetries (from JSON) ---
+        for T_flat in info.get('symmetries_discrete', []):
+            T = np.array(T_flat, dtype=np.float32).reshape(4, 4)
+            rots.append(torch.from_numpy(T[:3, :3].copy()))
+
+        # --- Continuous symmetries (from JSON) ---
+        found_continuous = False
+        for sym in info.get('symmetries_continuous', []):
+            axis = np.array(sym['axis'], dtype=np.float32)
+            axis = axis / np.linalg.norm(axis)
+            rots = _add_continuous_rotations(rots, axis, K_continuous)
+            found_continuous = True
+
+        # --- Fallback: manual override for missing entries ---
+        if not found_continuous and obj_id in missing_continuous:
+            axis = np.array(missing_continuous[obj_id], dtype=np.float32)
+            # Clear any discrete rotations — continuous supersedes them
+            rots = [torch.eye(3)]
+            rots = _add_continuous_rotations(rots, axis, K_continuous)
+            print(f"  obj {obj_id}: added manual continuous "
+                  f"symmetry (axis={axis.tolist()}, K={K_continuous})")
+
+        sym_dict[obj_id] = torch.stack(rots)
+
+    return sym_dict
+
+
+def _add_continuous_rotations(rots, axis, K):
+    """Append K-1 evenly spaced rotations around `axis` to `rots`."""
+    axis = axis / np.linalg.norm(axis)
+    K_skew = np.array([
+        [0,        -axis[2],  axis[1]],
+        [axis[2],   0,       -axis[0]],
+        [-axis[1],  axis[0],  0       ]
+    ], dtype=np.float32)
+    angles = np.linspace(0, 2 * np.pi, K, endpoint=False)
+    for angle in angles[1:]:  # skip 0 (identity)
+        R = (np.eye(3, dtype=np.float32)
+             + np.sin(angle) * K_skew
+             + (1 - np.cos(angle)) * (K_skew @ K_skew))
+
+        rots.append(torch.from_numpy(R))
+    return rots
+
+
+def pad_symmetry_transforms(sym_dict):
+    """Pad all objects to same K with identity (safe for min operation)."""
+    max_K = max(v.shape[0] for v in sym_dict.values())
+    padded = {}
+    for obj_id, rots in sym_dict.items():
+        K_i = rots.shape[0]
+        if K_i < max_K:
+            # Duplicate identity — doesn't affect min
+            pad = torch.eye(3).unsqueeze(0).expand(max_K - K_i, 3, 3)
+            rots = torch.cat([rots, pad], dim=0)
+        padded[obj_id] = rots
+    return padded, max_K

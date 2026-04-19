@@ -30,7 +30,7 @@ from .torchvision_datasets import CocoDetection
 #from datasets.coco import CocoDetection
 from util.misc import get_local_rank
 from util.quaternion_ops import quat2rot, rot2quat
-from util.rotation_utils import rotation_matrix_to_gram_schmidt_6d, rotation_matrix_to_raw_6d, rotation_6d_to_matrix, precompute_points
+from util.rotation_utils import rotation_matrix_to_gram_schmidt_6d, precompute_points, build_symmetry_transforms, pad_symmetry_transforms
 import data_utils.transforms as T
 from scipy.stats import truncnorm
 from PIL import Image
@@ -180,6 +180,10 @@ class PoseDataset(CocoDetection):
                         pass
         # Load symmetry info
         self._symmetry_info = {}
+        
+        # Build once needed for sym. aware L1 loss; dict[obj_id] -> (K, 3, 3) tensor of symmetry transforms
+        raw = build_symmetry_transforms(cad_models_path, K_continuous=360)
+        self.sym_transforms, self.max_K = pad_symmetry_transforms(raw) # self.sym_transforms: {obj_id: (K, 3, 3)}
         
         if model_symmetry is not None and Path(model_symmetry).is_file():
             sample_mesh_points = True
@@ -346,6 +350,29 @@ class PoseDataset(CocoDetection):
             target["diameter"] = torch.as_tensor(diam_list, dtype=torch.float32)
         else:
             target["diameter"] = torch.zeros(0, dtype=torch.float32)
+         
+
+        if len(labels) and self.sym_transforms:
+            sym_list = []
+            for cid in labels.tolist():
+                sym = self.sym_transforms.get(int(cid), None)
+                if sym is None:
+                    sym = torch.eye(3).unsqueeze(0).expand(self.max_K, 3, 3).clone()
+                sym_list.append(sym)
+            target["symmetry_transforms"] = torch.stack(sym_list, dim=0)
+        else:
+            target["symmetry_transforms"] = torch.zeros(0, self.max_K, 3, 3)
+        
+
+        # Sanaty check the symmetry transforms and print K for each object
+        # if len(labels):
+        #     print(f"sym_transforms shape: {target['symmetry_transforms'].shape}")
+        #     # Expected: (num_objects, 360, 3, 3) with K_continuous=360
+        #     for i, cid in enumerate(labels.tolist()):
+        #         K_actual = (target['symmetry_transforms'][i].sum(dim=(-1,-2)) != 3.0).sum()
+        #         # identity has trace=3, so non-identity count ≈ real symmetries
+        #         name = self._class_id_to_name.get(cid, str(cid))
+        #         print(f"  {name}: K={K_actual + 1}")
 
         return img, target
 

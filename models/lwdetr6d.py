@@ -823,6 +823,36 @@ class SetCriterion(nn.Module):
         return losses
     #### End My ADD-S and Rot loss.
 
+    def loss_L1_rot_sym_aware_min_distance_z(self, outputs, targets, indices, num_boxes):
+        idx = self._get_src_permutation_idx(indices)
+        src_rot = outputs["pred_rotations"][idx]                       # (N, 3, 3)
+        tgt_rot = torch.cat([t["relative_rotation"][i]
+                            for t, (_, i) in zip(targets, indices)], dim=0)  # (N, 3, 3)
+        sym_G   = torch.cat([t["symmetry_transforms"][i]
+                            for t, (_, i) in zip(targets, indices)], dim=0).float()  # (N, K, 3, 3)
+
+        # All equivalent target rotations: R_tgt @ g  for each g ∈ G
+        R_tgt_equiv = tgt_rot.unsqueeze(1) @ sym_G                    # (N, K, 3, 3)
+
+        # Convert to 6D representation
+        N, K = R_tgt_equiv.shape[:2]
+        R_pred_6d = rotation_matrix_to_raw_6d(src_rot)                # (N, 6)
+        R_tgt_equiv_6d = rotation_matrix_to_raw_6d(
+            R_tgt_equiv.reshape(N * K, 3, 3)
+        ).reshape(N, K, 6)                                             # (N, K, 6)
+
+        # L1 summed over 6 components, then min over K equivalences
+        per_equiv_loss = F.l1_loss(
+            R_pred_6d.unsqueeze(1).expand_as(R_tgt_equiv_6d),
+            R_tgt_equiv_6d,
+            reduction='none'
+        ).sum(dim=-1)                                                  # (N, K)
+
+        loss = per_equiv_loss.min(dim=-1).values                       # (N,)
+
+        return {'loss_rot': loss.sum() / num_boxes}
+
+
     ## YOLOX6D Keypoint loss (2D projection of 3D center)
     # TODO: Check if this is implemented correctly
     def loss_oks(self, outputs, targets, indices, num_boxes):
@@ -1396,7 +1426,10 @@ class SetCriterion(nn.Module):
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
             #loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
             # Symmetric Aware Rotation Loss derived from T6D.
-            loss_rot_dict = self.loss_rotation_sym_aware_T6D(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rotation_sym_aware_T6D(outputs, targets, indices, num_boxes)
+            
+            # Symmtery aware L1 loss on 6D rotation representation with min distance for symmetric objects.
+            loss_rot_dict = self.loss_L1_rot_sym_aware_min_distance_z(outputs, targets, indices, num_boxes)
             # Geodensic Loss
             #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
