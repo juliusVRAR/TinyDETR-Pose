@@ -585,6 +585,10 @@ class LWDETR6D(nn.Module):
             return pred_rotation
         raise NotImplementedError(f"Unsupported rotation mode: {self.rotation_mode}")
 
+    def _decode_sarr_rotations(self, raw_sarr, class_ids):
+        sym_v = get_sarr_symmetry_vectors(class_ids).to(device=raw_sarr.device)
+        return sarr_to_rotation_matrix(raw_sarr, sym_v.to(dtype=torch.long))
+
 
 class SetCriterion(nn.Module):
     """ This class computes the loss for Conditional DETR.

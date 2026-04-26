@@ -372,6 +372,7 @@ def pose_evaluate(model,
     """
     model.eval()
     matcher.eval()
+    model_without_ddp = model.module if hasattr(model, "module") else model
 
     # Reset pose evaluator to be empty
     pose_evaluator.reset()
@@ -414,14 +415,18 @@ def pose_evaluate(model,
         indices = matcher(outputs_without_aux, targets)
         idx = get_src_permutation_idx(indices)
 
+        matched_labels = torch.cat([t['labels'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         pred_translations = outputs_without_aux["pred_translations"][idx].detach().cpu().numpy()
-        pred_rotations = outputs_without_aux["pred_rotations"][idx].detach().cpu().numpy()
+        pred_rotations = outputs_without_aux["pred_rotations"][idx]
+        if getattr(model_without_ddp, "rotation_mode", None) == "sarr":
+            pred_rotations = model_without_ddp._decode_sarr_rotations(pred_rotations, matched_labels)
+        pred_rotations = pred_rotations.detach().cpu().numpy()
 
 
         tgt_translations = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0).detach().cpu().numpy()
         tgt_rotations = torch.cat([t['relative_rotation'][i] for t, (_, i) in zip(targets, indices)], dim=0).detach().cpu().numpy()
 
-        obj_classes_idx = torch.cat([t['labels'][i] for t, (_, i) in zip(targets, indices)], dim=0).detach().cpu().numpy()
+        obj_classes_idx = matched_labels.detach().cpu().numpy()
         intrinsics = torch.cat([t['intrinsics'][i] for t, (_, i) in zip(targets, indices)], dim=0).detach().cpu().numpy()
         img_files = [data_loader.dataset.coco.loadImgs(t["image_id"].item())[0]['file_name'] for t, (_, i) in zip(targets, indices) for _ in range(0, len(i))]
 
