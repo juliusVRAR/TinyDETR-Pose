@@ -43,11 +43,36 @@ def get_param_dict(args, model_without_ddp: nn.Module):
     backbone = model_without_ddp.backbone[0]
     backbone_named_param_lr_pairs = backbone.get_named_param_lr_pairs(args, prefix="backbone.0")
     backbone_param_lr_pairs = [param_dict for _, param_dict in backbone_named_param_lr_pairs.items()]
+    pose_head_lr = args.lr if args.lr_pose_heads is None else args.lr_pose_heads
+
+    pose_head_keys = (
+        'dec_rot_head',
+        'dec_trans_head',
+        'dec_trans_xy_head',
+        'dec_trans_z_head',
+        'transformer.enc_out_rot_embed',
+        'transformer.enc_out_trans_embed',
+        'transformer.enc_out_trans_xy_embed',
+        'transformer.enc_out_trans_z_embed',
+    )
+
+    pose_head_params = [
+        p
+        for n, p in model_without_ddp.named_parameters()
+        if any(key in n for key in pose_head_keys) and p.requires_grad
+    ]
+    pose_head_param_ids = {id(p) for p in pose_head_params}
+
+    pose_head_param_dicts = [
+        {"params": param, "lr": pose_head_lr}
+        for param in pose_head_params
+    ]
 
     decoder_key = 'transformer.decoder'
     decoder_params = [
         p
-        for n, p in model_without_ddp.named_parameters() if decoder_key in n and p.requires_grad
+        for n, p in model_without_ddp.named_parameters()
+        if decoder_key in n and p.requires_grad and id(p) not in pose_head_param_ids
     ]
 
     decoder_param_lr_pairs = [
@@ -58,7 +83,10 @@ def get_param_dict(args, model_without_ddp: nn.Module):
     other_params = [
         p
         for n, p in model_without_ddp.named_parameters() if (
-            n not in backbone_named_param_lr_pairs and decoder_key not in n and p.requires_grad)
+            n not in backbone_named_param_lr_pairs
+            and decoder_key not in n
+            and id(p) not in pose_head_param_ids
+            and p.requires_grad)
     ]
     other_param_dicts = [
         {"params": param, "lr": args.lr} 
@@ -66,7 +94,7 @@ def get_param_dict(args, model_without_ddp: nn.Module):
     ]
     
     final_param_dicts = (
-        other_param_dicts + backbone_param_lr_pairs + decoder_param_lr_pairs
+        other_param_dicts + pose_head_param_dicts + backbone_param_lr_pairs + decoder_param_lr_pairs
     )
 
     return final_param_dicts

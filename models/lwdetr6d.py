@@ -31,7 +31,13 @@ from util import box_ops
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size,
                        is_dist_avail_and_initialized)
-from util.rotation_utils import rotation_6d_to_matrix, rotation_6d_simple_to_matrix, rotation_matrix_to_raw_6d
+from util.rotation_utils import (
+    rotation_6d_to_matrix,
+    rotation_6d_simple_to_matrix,
+    rotation_matrix_to_raw_6d,
+    get_sarr_symmetry_vectors,
+    sarr_to_rotation_matrix,
+)
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .transformer import build_transformer
@@ -95,8 +101,8 @@ class LWDETR6D(nn.Module):
         self.xy_dim = 2
         self.z_dim = 2
         self.max_depth = 2.5 # TODO: derive from dataset / input
-        if self.rotation_mode == '6d':
-            self.rot_dim = 6 # GramSchmidt
+        if self.rotation_mode in {'6d', 'sarr'}:
+            self.rot_dim = 6
         else:
             raise NotImplementedError('Rotational representation is not supported.')
         
@@ -220,9 +226,14 @@ class LWDETR6D(nn.Module):
         #nn.init.constant_(rot_layer.bias, 0.0)
         #print(">> Rotation Head initialized. Zero (Neutral).")
         
-        # 6D identity: first two columns of I₃ = [1,0,0, 0,1,0]
-        rot_layer.bias.data = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
-        print(">> Rotation Head initialized to predict identity rotation (6D).")
+        if self.rotation_mode == "6d":
+            # 6D identity: first two columns of I3 = [1,0,0, 0,1,0]
+            rot_layer.bias.data = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+            print(">> Rotation Head initialized to predict identity rotation (6D).")
+        elif self.rotation_mode == "sarr":
+            # Identity SARR = [sin(0), cos(0)] repeated for XYZ.
+            rot_layer.bias.data = torch.tensor([0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+            print(">> Rotation Head initialized to predict identity rotation (SARR).")
         # prior_prob = 0.01
         # bias_value = -math.log((1 - prior_prob) / prior_prob)
         # nn.init.constant_(self.class_head.bias, bias_value)
@@ -254,6 +265,13 @@ class LWDETR6D(nn.Module):
         # -----------------------------------------------------------
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
+        if not torch.isfinite(samples.tensors).all():
+            finite = torch.isfinite(samples.tensors)
+            print("Non-finite samples detected before backbone.")
+            print(f"samples.tensors shape={tuple(samples.tensors.shape)} finite={int(finite.sum().item())}/{samples.tensors.numel()}")
+            print(f"samples.tensors min={torch.nan_to_num(samples.tensors).min().item():.6f}")
+            print(f"samples.tensors max={torch.nan_to_num(samples.tensors).max().item():.6f}")
+            raise RuntimeError("Non-finite samples before backbone")
         features, poss = self.backbone(samples)
         # Backup camera intrinsics (assumed pixels) for benchmark testing
         K = {
@@ -288,6 +306,40 @@ class LWDETR6D(nn.Module):
         hs, ref_unsigmoid, hs_enc, ref_enc = self.transformer(
             srcs, masks, poss, refpoint_embed_weight, query_feat_weight)
 
+        def _tensor_debug_stats(name, tensor):
+            finite = torch.isfinite(tensor)
+            print(f"{name}: shape={tuple(tensor.shape)} finite={int(finite.sum().item())}/{tensor.numel()}")
+            print(f"{name}: min={torch.nan_to_num(tensor).min().item():.6f} max={torch.nan_to_num(tensor).max().item():.6f}")
+
+        bad_src_idx = next((i for i, src in enumerate(srcs) if not torch.isfinite(src).all()), None)
+        bad_pos_idx = next((i for i, pos in enumerate(poss) if not torch.isfinite(pos).all()), None)
+        transformer_bad = (
+            bad_src_idx is not None
+            or bad_pos_idx is not None
+            or not torch.isfinite(hs).all()
+            or not torch.isfinite(ref_unsigmoid).all()
+            or (hs_enc is not None and not torch.isfinite(hs_enc).all())
+            or (ref_enc is not None and not torch.isfinite(ref_enc).all())
+        )
+        if transformer_bad:
+            print("Non-finite transformer inputs/outputs detected.")
+            if bad_src_idx is not None:
+                _tensor_debug_stats(f"srcs[{bad_src_idx}]", srcs[bad_src_idx])
+            else:
+                print("srcs: all finite")
+            if bad_pos_idx is not None:
+                _tensor_debug_stats(f"poss[{bad_pos_idx}]", poss[bad_pos_idx])
+            else:
+                print("poss: all finite")
+
+            _tensor_debug_stats("hs", hs)
+            _tensor_debug_stats("ref_unsigmoid", ref_unsigmoid)
+            if hs_enc is not None:
+                _tensor_debug_stats("hs_enc", hs_enc)
+            if ref_enc is not None:
+                _tensor_debug_stats("ref_enc", ref_enc)
+            raise RuntimeError("Non-finite transformer activations")
+
         if self.bbox_reparam:
             outputs_coord_delta = self.bbox_embed(hs)
             outputs_coord_cxcy = outputs_coord_delta[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
@@ -297,6 +349,21 @@ class LWDETR6D(nn.Module):
             )
         else:
             outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
+
+        if not torch.isfinite(outputs_coord).all():
+            finite_mask = torch.isfinite(outputs_coord)
+            print("Non-finite box predictions detected in outputs_coord.")
+            print(f"bbox_reparam={self.bbox_reparam}")
+            print(f"outputs_coord shape={tuple(outputs_coord.shape)}")
+            print(f"finite entries={int(finite_mask.sum().item())}/{outputs_coord.numel()}")
+            print(f"ref_unsigmoid finite={bool(torch.isfinite(ref_unsigmoid).all())}")
+            if self.bbox_reparam:
+                print(f"bbox head delta finite={bool(torch.isfinite(outputs_coord_delta).all())}")
+                print(f"bbox head delta min={torch.nan_to_num(outputs_coord_delta).min().item():.6f}")
+                print(f"bbox head delta max={torch.nan_to_num(outputs_coord_delta).max().item():.6f}")
+            print(f"outputs_coord min={torch.nan_to_num(outputs_coord).min().item():.6f}")
+            print(f"outputs_coord max={torch.nan_to_num(outputs_coord).max().item():.6f}")
+            raise RuntimeError("Non-finite predicted boxes in outputs_coord")
 
         outputs_class = self.class_embed(hs)
         # Prepare pred rotation for criterion
@@ -514,6 +581,9 @@ class LWDETR6D(nn.Module):
         """
         if self.rotation_mode == '6d':
             return rotation_6d_to_matrix(pred_rotation)
+        if self.rotation_mode == 'sarr':
+            return pred_rotation
+        raise NotImplementedError(f"Unsupported rotation mode: {self.rotation_mode}")
 
 
 class SetCriterion(nn.Module):
@@ -533,6 +603,7 @@ class SetCriterion(nn.Module):
                  use_varifocal_loss=False,
                  use_position_supervised_loss=False,
                  ia_bce_loss=False,
+                 rotation_mode='6d',
                  ):
         """ Create the criterion.
         Parameters:
@@ -554,10 +625,34 @@ class SetCriterion(nn.Module):
         self.use_varifocal_loss = use_varifocal_loss
         self.use_position_supervised_loss = use_position_supervised_loss
         self.ia_bce_loss = ia_bce_loss
+        self.rotation_mode = rotation_mode
         
         self.mae_loss = nn.L1Loss(reduction="none")
         self.mse_loss = nn.MSELoss(reduction="none")
         self.shape_loss = False
+
+    def _matched_target_labels(self, targets, indices):
+        return torch.cat([t["labels"][i] for t, (_, i) in zip(targets, indices)], dim=0)
+
+    def _decode_sarr_rotations(self, raw_sarr, class_ids):
+        sym_v = get_sarr_symmetry_vectors(class_ids).to(device=raw_sarr.device)
+        return sarr_to_rotation_matrix(raw_sarr, sym_v.to(dtype=torch.long))
+
+    def _matched_pred_rotation_matrices(self, outputs, targets, indices):
+        idx = self._get_src_permutation_idx(indices)
+        src_rot = outputs["pred_rotations"][idx]
+        if self.rotation_mode == "6d":
+            return src_rot
+        if self.rotation_mode == "sarr":
+            class_ids = self._matched_target_labels(targets, indices)
+            return self._decode_sarr_rotations(src_rot, class_ids)
+        raise NotImplementedError(f"Unsupported rotation mode: {self.rotation_mode}")
+
+    @staticmethod
+    def _pairwise_cosine_cost(pred, tgt, eps=1e-8):
+        pred = pred / pred.norm(dim=-1, keepdim=True).clamp_min(eps)
+        tgt = tgt / tgt.norm(dim=-1, keepdim=True).clamp_min(eps)
+        return 1.0 - torch.matmul(pred, tgt.transpose(0, 1))
         
 
     ###################PoET no CAD needed#########################
@@ -678,7 +773,11 @@ class SetCriterion(nn.Module):
             # 1. Fetch Data
             # Note: We don't need 'diameter' anymore if we want raw meter loss
             tgt = targets[b]
-            R_p, t_p = pred_R[b][pi], pred_t[b][pi]
+            if self.rotation_mode == "sarr":
+                R_p = self._decode_sarr_rotations(pred_R[b][pi], tgt["labels"][ti])
+            else:
+                R_p = pred_R[b][pi]
+            t_p = pred_t[b][pi]
             
             # Ensure targets are float32 to match preds
             R_g = tgt['relative_rotation'][ti].float() # (M, 3, 3)
@@ -742,7 +841,11 @@ class SetCriterion(nn.Module):
             # 1. Fetch Data
             # Note: We don't need 'diameter' anymore if we want raw meter loss
             tgt = targets[b]
-            R_p, t_p = pred_R[b][pi], pred_t[b][pi]
+            if self.rotation_mode == "sarr":
+                R_p = self._decode_sarr_rotations(pred_R[b][pi], tgt["labels"][ti])
+            else:
+                R_p = pred_R[b][pi]
+            t_p = pred_t[b][pi]
             
             # Ensure targets are float32 to match preds
             R_g = tgt['relative_rotation'][ti].float() # (M, 3, 3)
@@ -799,7 +902,10 @@ class SetCriterion(nn.Module):
 
         idx = self._get_src_permutation_idx(indices)
         src_rot = outputs["pred_rotations"][idx]          # (N,6) or (N,3,3)
-        tgt_rot = torch.cat([t["relative_rotation"][i] for t, (_, i) in zip(targets, indices)], dim=0)  # (N,6) or (N,3,3)
+        if self.rotation_mode == "sarr":
+            tgt_rot = torch.cat([t["relative_rotation_sarr"][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        else:
+            tgt_rot = torch.cat([t["relative_rotation"][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
         # Convert to rotation matrices
         if  src_rot.dim() == 3 and src_rot.shape[-2:] == (3,3):
@@ -825,7 +931,7 @@ class SetCriterion(nn.Module):
 
     def loss_L1_rot_sym_aware_min_distance_z(self, outputs, targets, indices, num_boxes):
         idx = self._get_src_permutation_idx(indices)
-        src_rot = outputs["pred_rotations"][idx]                       # (N, 3, 3)
+        src_rot = self._matched_pred_rotation_matrices(outputs, targets, indices)  # (N, 3, 3)
         tgt_rot = torch.cat([t["relative_rotation"][i]
                             for t, (_, i) in zip(targets, indices)], dim=0)  # (N, 3, 3)
         sym_G   = torch.cat([t["symmetry_transforms"][i]
@@ -1184,11 +1290,19 @@ class SetCriterion(nn.Module):
         L = arccos( 0.5 * (Trace(R\tilde(R)^T) -1)
         Calculates the loss in radiant.
         """
-        eps = 1e-6
         idx = self._get_src_permutation_idx(indices)
+        if self.rotation_mode == "sarr":
+            src_rot = outputs["pred_rotations"][idx]
+            tgt_rot = torch.cat(
+                [t["relative_rotation_sarr"][i] for t, (_, i) in zip(targets, indices)],
+                dim=0,
+            ).to(device=src_rot.device, dtype=src_rot.dtype)
+            loss = 1.0 - F.cosine_similarity(src_rot, tgt_rot, dim=-1, eps=1e-8)
+            return {"loss_rot": loss.sum() / num_boxes}
+
+        eps = 1e-6
         src_rot = outputs["pred_rotations"][idx]
         tgt_rot = torch.cat([t['relative_rotation'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        n_obj = len(tgt_rot)
 
         product = torch.bmm(src_rot, tgt_rot.transpose(1, 2))
         trace = torch.sum(product[:, torch.eye(3).bool()], 1)
@@ -1274,7 +1388,7 @@ class SetCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)        # (batch_idx, src_idx)
 
         # ── Predictions ─────────────────────────────────────────────────
-        R_p = outputs['pred_rotations'][idx]                # (N, 3, 3)
+        R_p = self._matched_pred_rotation_matrices(outputs, targets, indices)  # (N, 3, 3)
         t_p = outputs['pred_translations'][idx]             # (N, 3)
 
         # ── Targets ─────────────────────────────────────────────────────
@@ -1365,7 +1479,7 @@ class SetCriterion(nn.Module):
     # L1 on 6D rotation representation.
     def loss_L1_rot_sym_aware(self, outputs, targets, indices, num_boxes):
         idx = self._get_src_permutation_idx(indices)
-        src_rot = outputs["pred_rotations"][idx]
+        src_rot = self._matched_pred_rotation_matrices(outputs, targets, indices)
         tgt_rot = torch.cat([t["relative_rotation"][i] 
                             for t, (_, i) in zip(targets, indices)], dim=0)
         is_sym = torch.cat([t['is_symmetric'][i] 
@@ -1429,9 +1543,9 @@ class SetCriterion(nn.Module):
             #loss_rot_dict = self.loss_rotation_sym_aware_T6D(outputs, targets, indices, num_boxes)
             
             # Symmtery aware L1 loss on 6D rotation representation with min distance for symmetric objects.
-            loss_rot_dict = self.loss_L1_rot_sym_aware_min_distance_z(outputs, targets, indices, num_boxes)
+            # loss_rot_dict = self.loss_L1_rot_sym_aware_min_distance_z(outputs, targets, indices, num_boxes)
             # Geodensic Loss
-            #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
             # 6D representation with L1 loss (YOLOX6D Approach)
@@ -1743,9 +1857,10 @@ def position_supervised_loss(inputs, targets, num_boxes, alpha: float = 0.25, ga
 
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
-    def __init__(self, num_select=300) -> None:
+    def __init__(self, num_select=300, rotation_mode='6d') -> None:
         super().__init__()
         self.num_select = num_select
+        self.rotation_mode = rotation_mode
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
@@ -1778,7 +1893,12 @@ class PostProcess(nn.Module):
 
         # and 6D Poses
         topk_rotations = topk_indexes // out_logits.shape[2]
-        rotations = torch.gather(out_rot, 1, topk_rotations.unsqueeze(-1).unsqueeze(-1).repeat(1,1,3,3))
+        if self.rotation_mode == "sarr":
+            raw_rotations = torch.gather(out_rot, 1, topk_rotations.unsqueeze(-1).repeat(1, 1, 6))
+            sym_v = get_sarr_symmetry_vectors(labels).to(device=raw_rotations.device)
+            rotations = sarr_to_rotation_matrix(raw_rotations, sym_v.to(dtype=torch.long))
+        else:
+            rotations = torch.gather(out_rot, 1, topk_rotations.unsqueeze(-1).unsqueeze(-1).repeat(1,1,3,3))
         
         topk_uv = topk_indexes // out_logits.shape[2]
         uvs = torch.gather(out_uv, 1, topk_uv.unsqueeze(-1).repeat(1,1,2))
@@ -1882,7 +2002,7 @@ def build(args):
         two_stage=args.two_stage,
         lite_refpoint_refine=args.lite_refpoint_refine,
         bbox_reparam=args.bbox_reparam,
-        rotation_mode="6d",
+        rotation_mode=args.rotation_representation,
     )
     if args.pretrain_weights is not None:
         load_pretrained_weights(model, Path(args.pretrain_weights))
@@ -1931,8 +2051,9 @@ def build(args):
                              use_varifocal_loss = args.use_varifocal_loss,
                              use_position_supervised_loss=args.use_position_supervised_loss,
                              ia_bce_loss=args.ia_bce_loss,
+                             rotation_mode=args.rotation_representation,
                              )
     criterion.to(device)
-    postprocessors = {'bbox': PostProcess(num_select=args.num_select)}
+    postprocessors = {'bbox': PostProcess(num_select=args.num_select, rotation_mode=args.rotation_representation)}
 
     return model, criterion, postprocessors, matcher

@@ -136,6 +136,8 @@ class Backbone(BackboneBase):
             scale_factors=scale_factors,
         )
 
+        self._debug_checked_params = False
+
         self._export = False
 
     def export(self):
@@ -146,9 +148,62 @@ class Backbone(BackboneBase):
     def forward(self, tensor_list: NestedTensor):
         """
         """
+        def _debug_tensor(name, tensor):
+            finite = torch.isfinite(tensor)
+            print(f"{name}: shape={tuple(tensor.shape)} finite={int(finite.sum().item())}/{tensor.numel()}")
+            print(f"{name}: min={torch.nan_to_num(tensor).min().item():.6f} max={torch.nan_to_num(tensor).max().item():.6f}")
+
+        if not self._debug_checked_params:
+            bad_encoder_param = next(
+                (
+                    (name, param)
+                    for name, param in self.encoder.named_parameters()
+                    if not torch.isfinite(param).all()
+                ),
+                None,
+            )
+            if bad_encoder_param is not None:
+                name, param = bad_encoder_param
+                print("Non-finite encoder parameters detected before forward.")
+                _debug_tensor(f"encoder param {name}", param)
+                raise RuntimeError("Non-finite encoder parameters")
+
+            bad_projector_param = next(
+                (
+                    (name, param)
+                    for name, param in self.projector.named_parameters()
+                    if not torch.isfinite(param).all()
+                ),
+                None,
+            )
+            if bad_projector_param is not None:
+                name, param = bad_projector_param
+                print("Non-finite projector parameters detected before forward.")
+                _debug_tensor(f"projector param {name}", param)
+                raise RuntimeError("Non-finite projector parameters")
+
+            self._debug_checked_params = True
+
+        if not torch.isfinite(tensor_list.tensors).all():
+            print("Non-finite backbone input detected.")
+            _debug_tensor("backbone input", tensor_list.tensors)
+            raise RuntimeError("Non-finite backbone input")
+
         # (H, W, B, C)
         feats = self.encoder(tensor_list.tensors)
+        bad_encoder_idx = next((i for i, feat in enumerate(feats) if not torch.isfinite(feat).all()), None)
+        if bad_encoder_idx is not None:
+            print("Non-finite encoder features detected.")
+            _debug_tensor(f"encoder feat[{bad_encoder_idx}]", feats[bad_encoder_idx])
+            raise RuntimeError("Non-finite encoder features")
+
         feats = self.projector(feats)
+        bad_projector_idx = next((i for i, feat in enumerate(feats) if not torch.isfinite(feat).all()), None)
+        if bad_projector_idx is not None:
+            print("Non-finite projector features detected.")
+            _debug_tensor(f"projector feat[{bad_projector_idx}]", feats[bad_projector_idx])
+            raise RuntimeError("Non-finite projector features")
+
         # x: [(B, C, H, W)]
         out = []
         for feat in feats:

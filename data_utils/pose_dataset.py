@@ -30,7 +30,14 @@ from .torchvision_datasets import CocoDetection
 #from datasets.coco import CocoDetection
 from util.misc import get_local_rank
 from util.quaternion_ops import quat2rot, rot2quat
-from util.rotation_utils import rotation_matrix_to_gram_schmidt_6d, precompute_points, build_symmetry_transforms, pad_symmetry_transforms
+from util.rotation_utils import (
+    rotation_matrix_to_gram_schmidt_6d,
+    precompute_points,
+    build_symmetry_transforms,
+    pad_symmetry_transforms,
+    get_sarr_symmetry_vectors,
+    rotation_matrix_to_sarr,
+)
 import data_utils.transforms as T
 from scipy.stats import truncnorm
 from PIL import Image
@@ -343,6 +350,37 @@ class PoseDataset(CocoDetection):
         else:
             target["is_symmetric"] = torch.zeros(0, dtype=torch.bool)
 
+        if len(labels) and "relative_rotation" in target:
+            sarr_sym_v = get_sarr_symmetry_vectors(labels).to(dtype=torch.long)
+            rel_rot = target["relative_rotation"].float()
+            target["sarr_sym_v"] = sarr_sym_v
+            target["relative_rotation_sarr"] = rotation_matrix_to_sarr(
+                rel_rot,
+                sarr_sym_v.to(device=rel_rot.device),
+                clamp=True,
+            )
+            if not torch.isfinite(target["relative_rotation_sarr"]).all():
+                finite = torch.isfinite(target["relative_rotation_sarr"])
+                print("Non-finite relative_rotation_sarr detected in dataset target creation.")
+                print(f"labels={labels.tolist()}")
+                print(f"sarr_sym_v={sarr_sym_v.tolist()}")
+                print(
+                    f"relative_rotation_sarr shape={tuple(target['relative_rotation_sarr'].shape)} "
+                    f"finite={int(finite.sum().item())}/{target['relative_rotation_sarr'].numel()}"
+                )
+                print(
+                    f"relative_rotation_sarr min="
+                    f"{torch.nan_to_num(target['relative_rotation_sarr']).min().item():.6f}"
+                )
+                print(
+                    f"relative_rotation_sarr max="
+                    f"{torch.nan_to_num(target['relative_rotation_sarr']).max().item():.6f}"
+                )
+                raise RuntimeError("Non-finite relative_rotation_sarr")
+        else:
+            target["sarr_sym_v"] = torch.zeros(0, 3, dtype=torch.long)
+            target["relative_rotation_sarr"] = torch.zeros(0, 6, dtype=torch.float32)
+
         if len(labels) and self.models_info is not None:
             diam_list = []
             for cid in labels.tolist():
@@ -595,12 +633,12 @@ def make_pose_estimation_transform(image_set, use_rgb_augmentation, use_grayscal
             T.GrayScale(),
             T.ToTensor(),
             T.To3DImage(),
-            T.Normalize([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
     else:
         normalize = T.Compose([
             T.ToTensor(),
-            T.Normalize([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
 
     rgb_augmentation = T.Compose([T.Blur(),

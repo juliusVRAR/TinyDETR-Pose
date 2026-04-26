@@ -20,7 +20,7 @@ if [ -z "$RUN_ID" ]; then
 fi
 
 timestamp() {
-  date +"%T-%Y-%m-%d" # current time
+  date +"%T-%Y-%m-%d" # current time 
 }
 OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$RUN_ID/\_$JOB_NAME\_$(timestamp)           
 python -u -m torch.distributed.launch \
@@ -63,7 +63,7 @@ python -u -m torch.distributed.launch \
                             --pretrain_weights /workspace/LWDETR/data/weights/LWDETR_tiny_30e_objects365.pth \
                             --epochs 80 \
                             --num_select 100 \
-                            --num_queries 50 \
+                            --num_queries 100 \
                             --matcher_type "6d" \
                             --batch_size 16 \
                             --n_mesh_points 512 \
@@ -76,8 +76,9 @@ python -u -m torch.distributed.launch \
                             --bbox_loss_coef $COEF_BBOX \
                             --giou_loss_coef $COEF_GIOU \
                             --output_dir $OUTPUT_DIR \
-                            --warm_up_epochs 0 \
+                            --warm_up_epochs 1 \
                             --quick_eval \
+                            --rotation_representation sarr \
                             --reduce_det_loss_epochs 50
                              
                             

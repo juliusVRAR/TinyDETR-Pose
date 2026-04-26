@@ -57,6 +57,46 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if key == loss_name or key.startswith(f'{loss_name}_'):
                 criterion.weight_dict[key] = value
 
+    def raise_if_nonfinite_param(module: torch.nn.Module, context: str):
+        bad_param = next(
+            (
+                (name, param)
+                for name, param in module.named_parameters()
+                if torch.is_tensor(param) and not torch.isfinite(param).all()
+            ),
+            None,
+        )
+        if bad_param is None:
+            return
+        name, param = bad_param
+        finite = torch.isfinite(param)
+        print(f"Non-finite model parameter detected {context}.")
+        print(f"parameter={name}")
+        print(f"shape={tuple(param.shape)} finite={int(finite.sum().item())}/{param.numel()}")
+        print(f"min={torch.nan_to_num(param).min().item():.6f}")
+        print(f"max={torch.nan_to_num(param).max().item():.6f}")
+        raise RuntimeError(f"Non-finite parameter {name} {context}")
+
+    def raise_if_nonfinite_grad(module: torch.nn.Module, context: str):
+        bad_grad = next(
+            (
+                (name, param.grad)
+                for name, param in module.named_parameters()
+                if param.grad is not None and not torch.isfinite(param.grad).all()
+            ),
+            None,
+        )
+        if bad_grad is None:
+            return
+        name, grad = bad_grad
+        finite = torch.isfinite(grad)
+        print(f"Non-finite gradient detected {context}.")
+        print(f"parameter={name}")
+        print(f"shape={tuple(grad.shape)} finite={int(finite.sum().item())}/{grad.numel()}")
+        print(f"min={torch.nan_to_num(grad).min().item():.6f}")
+        print(f"max={torch.nan_to_num(grad).max().item():.6f}")
+        raise RuntimeError(f"Non-finite gradient {name} {context}")
+
     for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, 
                                                                                 print_freq, header)):
         it = start_steps + data_iter_step
@@ -151,6 +191,41 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         weight_dict = criterion.weight_dict
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
+        nonfinite_loss = next(
+            (
+                (name, value)
+                for name, value in loss_dict.items()
+                if torch.is_tensor(value) and not torch.isfinite(value).all()
+            ),
+            None,
+        )
+        if nonfinite_loss is not None or not torch.isfinite(losses).all():
+            print("Non-finite loss detected before backward.")
+            print(f"epoch={epoch} iter={data_iter_step}")
+            if nonfinite_loss is not None:
+                name, value = nonfinite_loss
+                finite = torch.isfinite(value)
+                print(f"loss component={name}")
+                print(f"shape={tuple(value.shape)} finite={int(finite.sum().item())}/{value.numel()}")
+                print(f"min={torch.nan_to_num(value).min().item():.6f}")
+                print(f"max={torch.nan_to_num(value).max().item():.6f}")
+            total_finite = torch.isfinite(losses)
+            print(f"total loss finite={int(total_finite.sum().item())}/{losses.numel()}")
+            print(f"total loss value={torch.nan_to_num(losses).item():.6f}")
+            for target_idx, target in enumerate(targets):
+                if "relative_rotation_sarr" not in target:
+                    continue
+                sarr = target["relative_rotation_sarr"]
+                finite = torch.isfinite(sarr)
+                print(
+                    f"target[{target_idx}].relative_rotation_sarr "
+                    f"shape={tuple(sarr.shape)} finite={int(finite.sum().item())}/{sarr.numel()}"
+                )
+                if sarr.numel() > 0:
+                    print(f"target[{target_idx}].relative_rotation_sarr min={torch.nan_to_num(sarr).min().item():.6f}")
+                    print(f"target[{target_idx}].relative_rotation_sarr max={torch.nan_to_num(sarr).max().item():.6f}")
+            raise RuntimeError("Non-finite loss before backward")
+
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
@@ -175,11 +250,15 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     unused.append(n)
             print("Unused this iter:", unused)
 
+        raise_if_nonfinite_grad(model, f"after backward at epoch={epoch} iter={data_iter_step}")
+
         if max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            raise_if_nonfinite_grad(model, f"after grad clipping at epoch={epoch} iter={data_iter_step}")
         
               
         optimizer.step()
+        raise_if_nonfinite_param(model, f"after optimizer step at epoch={epoch} iter={data_iter_step}")
 
         # TensorBoard logging
         if writer is not None and getattr(args, "tensorboard", False) and \

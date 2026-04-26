@@ -312,6 +312,8 @@ def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     # Learnining hyperparameters
     parser.add_argument('--lr', default=1e-4, type=float)
+    parser.add_argument('--lr_pose_heads', default=None, type=float,
+                        help='Learning rate for newly added pose prediction heads. Defaults to --lr when omitted.')
     parser.add_argument('--lr_encoder', default=1.5e-6, type=float) 
     parser.add_argument('--lr_backbone', default=1e-6, type=float) 
     parser.add_argument('--lr_transformer', default=1e-5, type=float)
@@ -400,8 +402,10 @@ def get_args_parser():
                         help="translation coefficient in the matching cost")
     parser.add_argument('--set_cost_keypoint', default=5., type=float,
                         help="keypoint coefficient in the matching cost")
-    parser.add_argument('--matcher_type', default='6d', choices=['6d', 'hungarian', 'yopo'], type=str,
+    parser.add_argument('--matcher_type', default='6d', choices=['6d', '6d_rot_trans', 'ablation', 'hungarian', 'yopo'], type=str,
                         help="Type of matcher to use, hungarian is the 3d match from lwdetr and will probably not work")
+    parser.add_argument('--ablation_topk_candidates', default=3, type=int,
+                        help='Per-target top-k detection candidates forwarded to the second-stage pose matcher.')
     
     # PoET Config
     parser.add_argument('--bbox_mode', default='backbone', type=str, choices=('gt', 'backbone', 'jitter'),
@@ -412,7 +416,7 @@ def get_args_parser():
                         help='Defines whether the transformer reference points are learned or extracted from the bounding boxes')
     parser.add_argument('--class_mode', default='specific', type=str, choices=('agnostic', 'specific'),
                         help="Determine whether PoET ist trained class-specific or class-agnostic")
-    parser.add_argument('--rotation_representation', default='6d', type=str, choices=('6d', 'quat', 'silho_quat'),
+    parser.add_argument('--rotation_representation', default='6d', type=str, choices=('6d', 'sarr', 'quat', 'silho_quat'),
                         help="Determine the rotation representation with which PoET is trained.")
     
     parser.add_argument('--query_embedding', default='bbox', type=str, choices=('bbox', 'learned'),
