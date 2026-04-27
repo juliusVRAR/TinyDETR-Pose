@@ -824,6 +824,10 @@ def rotation_matrix_to_sarr(R: torch.Tensor, sym_v: torch.Tensor, clamp: bool = 
     return sarr
 
 
+def _clamp_abs_preserve_sign(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    return torch.where(x >= 0, x.clamp(min=eps), x.clamp(max=-eps))
+
+
 def sarr_to_rotation_matrix(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Tensor:
     """
     Decode 6D SARR vectors ordered as [s_a, c_a, s_b, c_b, s_g, c_g]
@@ -891,8 +895,7 @@ def sarr_to_rotation_matrix(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Te
         k = flat_sym_v[idx, 0].to(dtype=sarr.dtype)
         alpha_raw = stable_acos(ca[idx])
         alpha[idx] = torch.where(sa[idx] < 0.0, 2.0 * math.pi - (alpha_raw / k), alpha_raw / k)
-        cos_alpha = torch.cos(alpha[idx]).clamp(min=1e-8) * torch.sign(torch.cos(alpha[idx])).clamp(min=0.0) + \
-            torch.cos(alpha[idx]).clamp(max=-1e-8) * torch.sign(torch.cos(alpha[idx])).clamp(max=0.0)
+        cos_alpha = _clamp_abs_preserve_sign(torch.cos(alpha[idx]))
         gamma_base = stable_acos(cg[idx])
         beta_base = stable_acos(cb[idx])
         gamma[idx] = torch.where((sg[idx] / cos_alpha) < 0.0, 2.0 * math.pi - gamma_base, gamma_base)
@@ -907,8 +910,7 @@ def sarr_to_rotation_matrix(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Te
         alpha_raw = signed_acos(sa[idx], ca[idx])
         alpha[idx] = alpha_raw / k0
 
-        cos_alpha = torch.cos(alpha[idx]).clamp(min=1e-8) * torch.sign(torch.cos(alpha[idx])).clamp(min=0.0) + \
-            torch.cos(alpha[idx]).clamp(max=-1e-8) * torch.sign(torch.cos(alpha[idx])).clamp(max=0.0)
+        cos_alpha = _clamp_abs_preserve_sign(torch.cos(alpha[idx]))
         beta_base = stable_acos(cb[idx])
         beta_raw = torch.where((sb[idx] / cos_alpha) < 0.0, 2.0 * math.pi - beta_base, beta_base)
         beta[idx] = beta_raw / k1

@@ -503,10 +503,7 @@ class LWDETR6D(nn.Module):
             trans_enc_z = torch.cat(trans_enc_z_list, dim=1)  # (B, total_queries, 1)
             kpt_enc = torch.cat(kpt_enc_list, dim=1)          # (B, total_queries, 2)
             
-            rot_c1 = F.normalize(rot_enc[..., :3], dim=-1) 
-            rot_c2 = F.normalize(rot_enc[..., 3:] - torch.sum(rot_c1 * rot_enc[..., 3:], dim=-1, keepdim=True) * rot_c1, dim=-1) 
-            rot_enc_full = torch.cat([rot_c1, rot_c2], dim=-1)          # (B, total_queries, 6)
-            rot_enc_full = self.process_rotation(rot_enc_full) # (B, total_queries, 3, 3)
+            rot_enc_full = self.process_rotation(rot_enc)
             out['enc_outputs'] = {
                 'pred_logits': cls_enc,
                 'pred_boxes': ref_enc,
@@ -1301,7 +1298,9 @@ class SetCriterion(nn.Module):
                 [t["relative_rotation_sarr"][i] for t, (_, i) in zip(targets, indices)],
                 dim=0,
             ).to(device=src_rot.device, dtype=src_rot.dtype)
-            loss = 1.0 - F.cosine_similarity(src_rot, tgt_rot, dim=-1, eps=1e-8)
+            # SARR decoding uses component magnitudes, so a global cosine loss can
+            # report zero error for scaled vectors that decode to different poses.
+            loss = F.l1_loss(src_rot, tgt_rot, reduction="none").sum(dim=-1)
             return {"loss_rot": loss.sum() / num_boxes}
 
         eps = 1e-6
