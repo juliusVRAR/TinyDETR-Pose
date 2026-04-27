@@ -76,7 +76,7 @@ python -u -m torch.distributed.launch \
                             --bbox_loss_coef $COEF_BBOX \
                             --giou_loss_coef $COEF_GIOU \
                             --output_dir $OUTPUT_DIR \
-                            --warm_up_epochs 1 \
+                            --warm_up_epochs 0 \
                             --quick_eval \
                             --rotation_representation sarr \
                             --reduce_det_loss_epochs 50

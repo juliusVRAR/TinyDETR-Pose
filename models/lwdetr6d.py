@@ -1298,9 +1298,7 @@ class SetCriterion(nn.Module):
                 [t["relative_rotation_sarr"][i] for t, (_, i) in zip(targets, indices)],
                 dim=0,
             ).to(device=src_rot.device, dtype=src_rot.dtype)
-            # SARR decoding uses component magnitudes, so a global cosine loss can
-            # report zero error for scaled vectors that decode to different poses.
-            loss = F.l1_loss(src_rot, tgt_rot, reduction="none").sum(dim=-1)
+            loss = 1.0 - F.cosine_similarity(src_rot, tgt_rot, dim=-1, eps=1e-8)
             return {"loss_rot": loss.sum() / num_boxes}
 
         eps = 1e-6
