@@ -22,7 +22,13 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
-from util.rotation_utils import rotation_matrix_to_gram_schmidt_6d, rotation_matrix_to_raw_6d, rotation_6d_to_matrix, rotation_6d_simple_to_matrix
+from util.rotation_utils import (
+    normalize_sarr_pairs,
+    rotation_matrix_to_gram_schmidt_6d,
+    rotation_matrix_to_raw_6d,
+    rotation_6d_to_matrix,
+    rotation_6d_simple_to_matrix,
+)
 
 
 def pairwise_cosine_distance_cost(pred_vectors, gt_vectors, eps=1e-8):
@@ -331,7 +337,10 @@ class Matcher6DRotTrans(nn.Module):
         )
         cost_translation = torch.cdist(out_trans, tgt_trans, p=2)
         if self.rotation_representation == "sarr":
-            cost_rotation = pairwise_cosine_distance_cost(out_rot, tgt_rot)
+            cost_rotation = pairwise_cosine_distance_cost(
+                normalize_sarr_pairs(out_rot),
+                normalize_sarr_pairs(tgt_rot),
+            )
         else:
             cost_rotation = self.rotation_geodesic_distance_cost(out_rot, tgt_rot)
 
@@ -450,7 +459,10 @@ class MatcherAblation(nn.Module):
 
         cost_translation = torch.cdist(out_trans, tgt_trans, p=2)
         if self.rotation_representation == "sarr":
-            cost_rotation = pairwise_cosine_distance_cost(out_rot, tgt_rot)
+            cost_rotation = pairwise_cosine_distance_cost(
+                normalize_sarr_pairs(out_rot),
+                normalize_sarr_pairs(tgt_rot),
+            )
         else:
             cost_rotation = self.rotation_geodesic_distance_cost(out_rot, tgt_rot)
         return self.cost_translation * cost_translation + self.cost_rotation * cost_rotation
@@ -651,7 +663,10 @@ class MatcherYOPO(nn.Module):
         cost_trans = torch.cdist(out_trans, tgt_trans, p=2)
         # Compute the geodesic cost between rotation matrices (3x3)
         if self.rotation_representation == "sarr":
-            cost_rot = pairwise_cosine_distance_cost(out_rot, tgt_rot)
+            cost_rot = pairwise_cosine_distance_cost(
+                normalize_sarr_pairs(out_rot),
+                normalize_sarr_pairs(tgt_rot),
+            )
         else:
             cost_rot = self.rotation_geodesic_distance_cost(pred_rotations=out_rot, gt_rotations=tgt_rot)
         # Final cost matrix

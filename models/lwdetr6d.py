@@ -32,6 +32,7 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size,
                        is_dist_avail_and_initialized)
 from util.rotation_utils import (
+    normalize_sarr_pairs,
     rotation_6d_to_matrix,
     rotation_6d_simple_to_matrix,
     rotation_matrix_to_raw_6d,
@@ -584,7 +585,7 @@ class LWDETR6D(nn.Module):
 
     def _decode_sarr_rotations(self, raw_sarr, class_ids):
         sym_v = get_sarr_symmetry_vectors(class_ids).to(device=raw_sarr.device)
-        return sarr_to_rotation_matrix(raw_sarr, sym_v.to(dtype=torch.long))
+        return sarr_to_rotation_matrix(normalize_sarr_pairs(raw_sarr), sym_v.to(dtype=torch.long))
 
 
 class SetCriterion(nn.Module):
@@ -637,7 +638,7 @@ class SetCriterion(nn.Module):
 
     def _decode_sarr_rotations(self, raw_sarr, class_ids):
         sym_v = get_sarr_symmetry_vectors(class_ids).to(device=raw_sarr.device)
-        return sarr_to_rotation_matrix(raw_sarr, sym_v.to(dtype=torch.long))
+        return sarr_to_rotation_matrix(normalize_sarr_pairs(raw_sarr), sym_v.to(dtype=torch.long))
 
     def _matched_pred_rotation_matrices(self, outputs, targets, indices):
         idx = self._get_src_permutation_idx(indices)
@@ -1298,7 +1299,10 @@ class SetCriterion(nn.Module):
                 [t["relative_rotation_sarr"][i] for t, (_, i) in zip(targets, indices)],
                 dim=0,
             ).to(device=src_rot.device, dtype=src_rot.dtype)
+            src_rot = normalize_sarr_pairs(src_rot).reshape(-1, 3, 2)
+            tgt_rot = normalize_sarr_pairs(tgt_rot).reshape(-1, 3, 2)
             loss = 1.0 - F.cosine_similarity(src_rot, tgt_rot, dim=-1, eps=1e-8)
+            loss = loss.mean(dim=-1)
             return {"loss_rot": loss.sum() / num_boxes}
 
         eps = 1e-6
@@ -1537,7 +1541,7 @@ class SetCriterion(nn.Module):
 
             # Compute individual losses
             # ADD(-S) Loss (Symmetry-aware point-to-point)
-            loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
+            # loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
             #loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
             # Symmetric Aware Rotation Loss derived from T6D.
@@ -1558,7 +1562,7 @@ class SetCriterion(nn.Module):
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
             
             # Extract loss values
-            loss_adds = loss_adds_dict['loss_adds']
+            # loss_adds = loss_adds_dict['loss_adds']
             loss_rot = loss_rot_dict['loss_rot']
             #loss_trans = loss_trans_dict['loss_translation']
             loss_kpt = loss_kpt_dict['loss_keypoint']
@@ -1567,7 +1571,7 @@ class SetCriterion(nn.Module):
 
             # Total weighted pose loss
             loss_pose_total = (
-                lambda_adds * loss_adds +
+                #lambda_adds * loss_adds +
                 lambda_rot * loss_rot +
                 lambda_kpt * loss_kpt +
                 lambda_trans_z * loss_trans_z #+
@@ -1587,7 +1591,7 @@ class SetCriterion(nn.Module):
                 'loss_keypoint': loss_kpt,
                 #'loss_trans_xy': loss_trans_xy,
                 'loss_trans_z': loss_trans_z,
-                "loss_adds": loss_adds,
+                #"loss_adds": loss_adds,
             }
         else:
             return {}
@@ -1897,7 +1901,7 @@ class PostProcess(nn.Module):
         if self.rotation_mode == "sarr":
             raw_rotations = torch.gather(out_rot, 1, topk_rotations.unsqueeze(-1).repeat(1, 1, 6))
             sym_v = get_sarr_symmetry_vectors(labels).to(device=raw_rotations.device)
-            rotations = sarr_to_rotation_matrix(raw_rotations, sym_v.to(dtype=torch.long))
+            rotations = sarr_to_rotation_matrix(normalize_sarr_pairs(raw_rotations), sym_v.to(dtype=torch.long))
         else:
             rotations = torch.gather(out_rot, 1, topk_rotations.unsqueeze(-1).unsqueeze(-1).repeat(1,1,3,3))
         

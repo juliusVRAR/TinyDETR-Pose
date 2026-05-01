@@ -16,10 +16,10 @@ from pathlib import Path
 
 SARR_YCBV_SYM_V = {
     13: (1, 1, 1000),  # 024_bowl
-    16: (2, 2, 2),     # 036_wood_block
+    16: (1, 1, 4),     # 036_wood_block
     19: (1, 2, 1),     # 051_large_clamp
     20: (1, 2, 1),     # 052_extra_large_clamp
-    21: (2, 2, 2),     # 061_foam_brick
+    21: (1, 1, 2),     # 061_foam_brick
 }
 
 DEFAULT_ACOS_BOUND = 1.0 - 1e-4
@@ -662,6 +662,18 @@ def get_sarr_symmetry_vectors(class_ids: torch.Tensor) -> torch.Tensor:
     return sym_v
 
 
+def normalize_sarr_pairs(sarr: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Normalize each [sin(theta), cos(theta)] pair in a flattened 6D SARR vector.
+    """
+    if sarr.shape[-1] != 6:
+        raise ValueError(f"Expected (..., 6), got {tuple(sarr.shape)}")
+    shape = sarr.shape
+    pairs = sarr.reshape(*shape[:-1], 3, 2)
+    pairs = F.normalize(pairs, p=2, dim=-1, eps=eps)
+    return pairs.reshape(shape)
+
+
 def xyz_euler_to_matrix_torch(angles: torch.Tensor) -> torch.Tensor:
     """
     Convert XYZ intrinsic Tait-Bryan angles to rotation matrices using the
@@ -836,7 +848,7 @@ def sarr_to_rotation_matrix(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Te
     if sarr.shape[-1] != 6:
         raise ValueError(f"Expected (..., 6), got {tuple(sarr.shape)}")
 
-    flat_sarr = sarr.reshape(-1, 6)
+    flat_sarr = normalize_sarr_pairs(sarr).reshape(-1, 6)
     flat_sym_v = sym_v.reshape(-1, 3).to(device=flat_sarr.device)
     sa, ca, sb, cb, sg, cg = flat_sarr.unbind(dim=-1)
     ca = ca.clamp(-1.0, 1.0)
