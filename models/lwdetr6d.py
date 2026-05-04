@@ -636,9 +636,20 @@ class SetCriterion(nn.Module):
     def _matched_target_labels(self, targets, indices):
         return torch.cat([t["labels"][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
+    def _matched_target_sarr_sym_v(self, targets, indices):
+        if "sarr_sym_v" in targets[0]:
+            return torch.cat([t["sarr_sym_v"][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        return get_sarr_symmetry_vectors(self._matched_target_labels(targets, indices))
+
     def _decode_sarr_rotations(self, raw_sarr, class_ids):
         sym_v = get_sarr_symmetry_vectors(class_ids).to(device=raw_sarr.device)
         return sarr_to_rotation_matrix(normalize_sarr_pairs(raw_sarr), sym_v.to(dtype=torch.long))
+
+    def _decode_sarr_rotations_with_sym_v(self, raw_sarr, sym_v):
+        return sarr_to_rotation_matrix(
+            normalize_sarr_pairs(raw_sarr),
+            sym_v.to(device=raw_sarr.device, dtype=torch.long),
+        )
 
     def _matched_pred_rotation_matrices(self, outputs, targets, indices):
         idx = self._get_src_permutation_idx(indices)
@@ -646,8 +657,8 @@ class SetCriterion(nn.Module):
         if self.rotation_mode == "6d":
             return src_rot
         if self.rotation_mode == "sarr":
-            class_ids = self._matched_target_labels(targets, indices)
-            return self._decode_sarr_rotations(src_rot, class_ids)
+            sym_v = self._matched_target_sarr_sym_v(targets, indices)
+            return self._decode_sarr_rotations_with_sym_v(src_rot, sym_v)
         raise NotImplementedError(f"Unsupported rotation mode: {self.rotation_mode}")
 
     @staticmethod
@@ -831,67 +842,38 @@ class SetCriterion(nn.Module):
         """
         ADD / ADD-S loss (Raw Meter Distance).
         """
-        pred_R = outputs['pred_rotations']     # (B, Q, 3, 3)
-        pred_t = outputs['pred_translations']  # (B, Q, 3)
+        idx = self._get_src_permutation_idx(indices)
+        if idx[0].numel() == 0:
+            return {'loss_adds': outputs['pred_translations'].new_zeros(())}
 
-        # We will accumulate the SUM of distances and divide by num_boxes at the end
-        total_dist_sum = 0.0
+        R_p = self._matched_pred_rotation_matrices(outputs, targets, indices)
+        t_p = outputs['pred_translations'][idx]
 
-        for b, (pi, ti) in enumerate(indices):
-            if len(pi) == 0: continue
+        R_g = torch.cat(
+            [t['relative_rotation'][i].float() for t, (_, i) in zip(targets, indices)], dim=0
+        )
+        t_g = torch.cat(
+            [t['relative_position'][i].float() for t, (_, i) in zip(targets, indices)], dim=0
+        )
+        pts = torch.cat(
+            [t['model_points'][i].float() for t, (_, i) in zip(targets, indices)], dim=0
+        )
+        sym = torch.cat(
+            [t['is_symmetric'][i].bool() for t, (_, i) in zip(targets, indices)], dim=0
+        )
 
-            # 1. Fetch Data
-            # Note: We don't need 'diameter' anymore if we want raw meter loss
-            tgt = targets[b]
-            if self.rotation_mode == "sarr":
-                R_p = self._decode_sarr_rotations(pred_R[b][pi], tgt["labels"][ti])
-            else:
-                R_p = pred_R[b][pi]
-            t_p = pred_t[b][pi]
-            
-            # Ensure targets are float32 to match preds
-            R_g = tgt['relative_rotation'][ti].float() # (M, 3, 3)
-            t_g = tgt['relative_position'][ti].float() # (M, 3)
-            pts = tgt['model_points'][ti].float() # (M, P, 3)
-            sym = tgt['is_symmetric'][ti].bool()  # (M,)
+        pts_p = torch.bmm(R_p, pts.transpose(1, 2)).transpose(1, 2) + t_p.unsqueeze(1)
+        pts_g = torch.bmm(R_g, pts.transpose(1, 2)).transpose(1, 2) + t_g.unsqueeze(1)
 
-            # 2. Transform Points (Batch Matrix Multiplication)
-            # Formula: (R @ points.T).T + t
-            # pred: (M, 3, 3) @ (M, 3, P) -> (M, 3, P) -> (M, P, 3)
-            pts_p = torch.bmm(R_p, pts.transpose(1, 2)).transpose(1, 2) + t_p.unsqueeze(1)
-            pts_g = torch.bmm(R_g, pts.transpose(1, 2)).transpose(1, 2) + t_g.unsqueeze(1)
+        dists = (pts_p - pts_g).norm(dim=-1).mean(dim=-1)
 
-            # 3. Calculate Distances
-            # Default: ADD (Non-Symmetric) - 1-to-1 distance
-            # Shape: (M, P, 3) -> (M, P) -> (M,)
-            diff = pts_p - pts_g
-            dists = diff.norm(dim=-1).mean(dim=-1)
+        sym_idx = torch.where(sym)[0]
+        p_sym = pts_p[sym_idx]
+        g_sym = pts_g[sym_idx]
+        min_dists = torch.cdist(p_sym, g_sym, p=2).min(dim=2).values.mean(dim=1)
+        dists[sym_idx] = min_dists
 
-            # 4. Handle Symmetric Objects (ADD-S)
-            if sym.any():
-                sym_idx = torch.where(sym)[0]
-                
-                # Extract symmetric subset
-                p_sym = pts_p[sym_idx] # (S, P, 3)
-                g_sym = pts_g[sym_idx] # (S, P, 3)
-
-                # Compute pairwise distance matrix (S, P, P)
-                # This finds the closest point on GT for every point on Pred
-                pairwise_dist = torch.cdist(p_sym, g_sym, p=2)
-                
-                # Min over GT points (dim 2), then Mean over Pred points (dim 1)
-                min_dists = pairwise_dist.min(dim=2).values.mean(dim=1)
-                
-                # Overwrite the standard ADD distances with ADD-S distances
-                dists[sym_idx] = min_dists
-
-            # 5. Sum up the error for this batch
-            total_dist_sum += dists.sum()
-
-        # 6. Normalize by total number of matched objects in the batch (DETR standard)
-        # Avoid division by zero
-        num_boxes = max(num_boxes, 1)
-        loss_adds = total_dist_sum / num_boxes
+        loss_adds = dists.sum() / max(num_boxes, 1)
 
         return {'loss_adds': loss_adds}
     # Rotation loss from YOLO-6D Paper (6D representation with L1 loss) 
@@ -1541,7 +1523,7 @@ class SetCriterion(nn.Module):
 
             # Compute individual losses
             # ADD(-S) Loss (Symmetry-aware point-to-point)
-            # loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
+            loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
             #loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
             # Symmetric Aware Rotation Loss derived from T6D.
@@ -1562,7 +1544,7 @@ class SetCriterion(nn.Module):
             loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
             
             # Extract loss values
-            # loss_adds = loss_adds_dict['loss_adds']
+            loss_adds = loss_adds_dict['loss_adds']
             loss_rot = loss_rot_dict['loss_rot']
             #loss_trans = loss_trans_dict['loss_translation']
             loss_kpt = loss_kpt_dict['loss_keypoint']
@@ -1591,7 +1573,7 @@ class SetCriterion(nn.Module):
                 'loss_keypoint': loss_kpt,
                 #'loss_trans_xy': loss_trans_xy,
                 'loss_trans_z': loss_trans_z,
-                #"loss_adds": loss_adds,
+                "loss_adds": loss_adds,
             }
         else:
             return {}

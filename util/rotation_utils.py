@@ -15,12 +15,18 @@ from pathlib import Path
 
 
 SARR_YCBV_SYM_V = {
+    # 1:  (1, 1, 1000),   # 002_master_chef_can  (only discrete 180° in JSON)
+    # 4:  (0, 1, 1000),   # 005_tomato_soup_can  (nothing in JSON)
+    # 6:  (0, 1, 1000),   # 007_tuna_fish_can    (nothing in JSON)
     13: (1, 1, 1000),  # 024_bowl
     16: (1, 1, 4),     # 036_wood_block
     19: (1, 2, 1),     # 051_large_clamp
     20: (1, 2, 1),     # 052_extra_large_clamp
     21: (1, 1, 2),     # 061_foam_brick
 }
+_SARR_YCBV_SYM_TABLE = torch.ones(max(SARR_YCBV_SYM_V) + 1, 3, dtype=torch.long)
+for _cls_id, _sym_v in SARR_YCBV_SYM_V.items():
+    _SARR_YCBV_SYM_TABLE[_cls_id] = torch.tensor(_sym_v, dtype=torch.long)
 
 DEFAULT_ACOS_BOUND = 1.0 - 1e-4
 
@@ -653,13 +659,13 @@ def get_sarr_symmetry_vectors(class_ids: torch.Tensor) -> torch.Tensor:
     """
     class_ids = torch.as_tensor(class_ids)
     device = class_ids.device
-    shape = class_ids.shape
-    sym_v = torch.ones(*shape, 3, device=device, dtype=torch.long)
-    for cls_id, vec in SARR_YCBV_SYM_V.items():
-        mask = class_ids == cls_id
-        if mask.any():
-            sym_v[mask] = torch.tensor(vec, device=device, dtype=torch.long)
-    return sym_v
+    table = _SARR_YCBV_SYM_TABLE.to(device=device)
+    flat_ids = class_ids.reshape(-1).long()
+    valid = (flat_ids >= 0) & (flat_ids < table.shape[0])
+    safe_ids = flat_ids.clamp(0, table.shape[0] - 1)
+    sym_v = table[safe_ids]
+    sym_v = torch.where(valid.unsqueeze(-1), sym_v, torch.ones_like(sym_v))
+    return sym_v.reshape(*class_ids.shape, 3)
 
 
 def normalize_sarr_pairs(sarr: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -840,10 +846,10 @@ def _clamp_abs_preserve_sign(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor
     return torch.where(x >= 0, x.clamp(min=eps), x.clamp(max=-eps))
 
 
-def sarr_to_rotation_matrix(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Tensor:
+def sarr_to_rotation_matrix_old(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Tensor:
     """
-    Decode 6D SARR vectors ordered as [s_a, c_a, s_b, c_b, s_g, c_g]
-    into canonical rotation matrices.
+    Decode 6D SARR vectors with the previous stable-acos branch implementation.
+    Kept for comparisons against the GPU-friendlier sarr_to_rotation_matrix.
     """
     if sarr.shape[-1] != 6:
         raise ValueError(f"Expected (..., 6), got {tuple(sarr.shape)}")
@@ -933,6 +939,90 @@ def sarr_to_rotation_matrix(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Te
         gamma_base = stable_acos(cg[idx])
         gamma_raw = torch.where((sg[idx] / denom) < 0.0, 2.0 * math.pi - gamma_base, gamma_base)
         gamma[idx] = torch.where(k2 == 1000, torch.zeros_like(gamma_raw), gamma_raw / k2)
+
+    angles = torch.stack([alpha, beta, gamma], dim=-1)
+    R = xyz_euler_to_matrix_torch(angles)
+    return R.reshape(*sarr.shape[:-1], 3, 3)
+
+
+def sarr_to_rotation_matrix(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Tensor:
+    """
+    Decode 6D SARR vectors ordered as [s_a, c_a, s_b, c_b, s_g, c_g]
+    into canonical rotation matrices.
+
+    Network predictions are normalized per SARR column before decoding, as in
+    the SARR paper. For symmetry classes whose sine terms are scaled by nu
+    factors, the inverse must undo that scaling before recovering the angle.
+    """
+    if sarr.shape[-1] != 6:
+        raise ValueError(f"Expected (..., 6), got {tuple(sarr.shape)}")
+
+    flat_sarr = normalize_sarr_pairs(sarr).reshape(-1, 6)
+    flat_sym_v = sym_v.reshape(-1, 3).to(device=flat_sarr.device)
+    sa, ca, sb, cb, sg, cg = flat_sarr.unbind(dim=-1)
+    ca = ca.clamp(-1.0, 1.0)
+    cb = cb.clamp(-1.0, 1.0)
+    cg = cg.clamp(-1.0, 1.0)
+
+    two_pi = 2.0 * math.pi
+
+    def angle_mod(sin_term: torch.Tensor, cos_term: torch.Tensor) -> torch.Tensor:
+        return torch.remainder(torch.atan2(sin_term, cos_term), two_pi)
+
+    def angle_abs(sin_term: torch.Tensor, cos_term: torch.Tensor) -> torch.Tensor:
+        return torch.atan2(sin_term.abs(), cos_term)
+
+    all_one = (flat_sym_v == 1).all(dim=-1)
+    z_only = (flat_sym_v[:, 2] > 1) & (flat_sym_v[:, 0] == 1) & (flat_sym_v[:, 1] == 1)
+    y_only = (flat_sym_v[:, 1] > 1) & (flat_sym_v[:, 0] == 1) & (flat_sym_v[:, 2] == 1)
+    x_only = (flat_sym_v[:, 0] > 1) & (flat_sym_v[:, 1] == 1) & (flat_sym_v[:, 2] == 1)
+    mixed = ~(all_one | z_only | y_only | x_only)
+
+    k0 = flat_sym_v[:, 0].to(dtype=sarr.dtype)
+    k1 = flat_sym_v[:, 1].to(dtype=sarr.dtype)
+    k2 = flat_sym_v[:, 2].to(dtype=sarr.dtype)
+
+    alpha_plain = angle_mod(sa, ca)
+    beta_plain = angle_mod(sb, cb)
+    gamma_plain = angle_mod(sg, cg)
+
+    gamma_z = torch.where(k2 == 1000, torch.zeros_like(gamma_plain), gamma_plain / k2)
+
+    beta_y_abs = angle_abs(sb, cb) / k1
+    beta_y = torch.where(sb < 0.0, (two_pi / k1) - beta_y_abs, beta_y_abs)
+    cos_beta_y = _clamp_abs_preserve_sign(torch.cos(beta_y))
+    gamma_y = angle_mod(sg / cos_beta_y, cg)
+
+    alpha_x_abs = angle_abs(sa, ca) / k0
+    alpha_x = torch.where(sa < 0.0, two_pi - alpha_x_abs, alpha_x_abs)
+    cos_alpha_x = _clamp_abs_preserve_sign(torch.cos(alpha_x))
+    beta_x = angle_mod(sb / cos_alpha_x, cb)
+    gamma_x = angle_mod(sg / cos_alpha_x, cg)
+
+    alpha_mixed = alpha_plain / k0
+    cos_alpha_mixed = _clamp_abs_preserve_sign(torch.cos(alpha_mixed))
+    beta_mixed = angle_mod(sb / cos_alpha_mixed, cb) / k1
+    cos_beta_mixed = torch.cos(beta_mixed)
+    denom_mixed = cos_beta_mixed * cos_alpha_mixed
+    denom_mixed = torch.where(
+        denom_mixed >= 0,
+        denom_mixed.clamp(min=1e-8),
+        denom_mixed.clamp(max=-1e-8),
+    )
+    gamma_mixed_raw = angle_mod(sg / denom_mixed, cg)
+    gamma_mixed = torch.where(k2 == 1000, torch.zeros_like(gamma_mixed_raw), gamma_mixed_raw / k2)
+
+    alpha = torch.where(x_only, alpha_x, torch.where(mixed, alpha_mixed, alpha_plain))
+    beta = torch.where(
+        y_only,
+        beta_y,
+        torch.where(x_only, beta_x, torch.where(mixed, beta_mixed, beta_plain)),
+    )
+    gamma = torch.where(
+        z_only,
+        gamma_z,
+        torch.where(y_only, gamma_y, torch.where(x_only, gamma_x, torch.where(mixed, gamma_mixed, gamma_plain))),
+    )
 
     angles = torch.stack([alpha, beta, gamma], dim=-1)
     R = xyz_euler_to_matrix_torch(angles)
