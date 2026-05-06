@@ -17,6 +17,12 @@ import cv2
 import numpy as np
 import torch
 from util.box_ops import box_xyxy_to_cxcywh
+from util.quaternion_ops import rot2quat
+from util.rotation_utils import (
+    get_sarr_symmetry_vectors,
+    rotation_matrix_to_gram_schmidt_6d,
+    rotation_matrix_to_sarr,
+)
 import data_utils.transforms as T
 from PIL import Image
 from pathlib import Path
@@ -76,7 +82,7 @@ def augment_hsv(img, hgain=5, sgain=30, vgain=30):
 
 
 def get_aug_params(value, center=0):
-    if isinstance(value, float):
+    if isinstance(value, (int, float)):
         return random.uniform(center - value, center + value)
     elif len(value) == 2:
         return random.uniform(value[0], value[1])
@@ -216,19 +222,9 @@ def apply_affine_to_object_pose(obj_center_2d,
     # Back to mm
     translation = translation / 1000.0
     
-    ###########
-    #transform Rotation
-    ### This is not necessary we have the full rotation matrix already
-    r1 = rotation[:, 0:1] # Extract first rotation column (3 numbers) and add axis for stacking.
-    r2 = rotation[:, 1:2] # Extract second rotation column (next 3 numbers).
-    r3 = np.cross(r1, r2, axis=2) # Recompute third column via cross product to form orthonormal basis.
-    rotation_mat = np.concatenate((r1, r2, r3), axis=1)  # Build full 3x3 rotation per object.
-    #########
     deltaR = cv2.getRotationMatrix2D(angle=angle, center=(0, 0), scale=1.0)  # 2D (in-plane Z) rotation (2x3).
     deltaR = np.vstack((deltaR, np.array([[0, 0, 1.0]])) ) # Extend to 3x3 by adding last row [0,0,1].
-    rotation_mat = deltaR @ rotation_mat # Left-multiply: rotate pose about camera Z axis.
-    rotation[:, 0:1] = rotation_mat[:, 0:1] # Store updated first rotation column back.
-    rotation[:, 1:2] = rotation_mat[:, 1:2] # Store updated second rotation column back.
+    rotation = deltaR[None, :, :] @ rotation # Left-multiply: rotate pose about camera Z axis.
     
     return obj_center_2d, translation, rotation
 
@@ -282,6 +278,7 @@ def random_affine_single(
         out = Path(DEBUG_OUT, "after_random_affine", "affine_rgb.jpg")
         cv2.imwrite(out, img)
     # Transform 2D bbox coordinates
+    affine_boxes = np.zeros((0, 4), dtype=np.float32)
     if len(target['boxes']) > 0:
         width = target['orig_size'][1].item()
         height = target['orig_size'][0].item()
@@ -296,7 +293,7 @@ def random_affine_single(
             y2 = (y_center + h/2) * height
             lst_boxes_xyxy.append([x1.item(), y1.item(), x2.item(), y2.item()])
 
-        affine_boxes= np.array(lst_boxes_xyxy) # xyxy and absolute pixel coords
+        affine_boxes= np.array(lst_boxes_xyxy, dtype=np.float32) # xyxy and absolute pixel coords
         affine_boxes = apply_affine_to_bboxes(affine_boxes, 
                                          (target_size[1],target_size[0]), 
                                          M)
@@ -310,11 +307,17 @@ def random_affine_single(
     if len(affine_boxes) > min_len:
         affine_boxes = affine_boxes[:min_len]
         
+    per_object_keys = [
+        'boxes', 'labels', 'relative_position', 'relative_translation_z',
+        'relative_rotation', 'relative_rotation_gs', 'relative_quaternions',
+        'relative_rotation_sarr', 'sarr_sym_v', 'object_center_2d',
+        'intrinsics', 'model_points', 'is_symmetric', 'diameter',
+        'symmetry_transforms', 'area', 'iscrowd'
+    ]
+
     # Sync all target fields to this minimum length immediately
     # This prevents the "skip" bug where mismatched fields were ignored
-    for key in ['boxes', 'labels', 'relative_position', 'relative_rotation', 
-                'relative_quaternions', 'object_center_2d', 'intrinsics', 
-                'model_points', 'is_symmetric', 'diameter']:
+    for key in per_object_keys:
         if key in target:
             t = target[key]
             if isinstance(t, torch.Tensor) and t.shape[0] > min_len:
@@ -332,21 +335,16 @@ def random_affine_single(
     w = affine_boxes[:, 2] - affine_boxes[:, 0]
     h = affine_boxes[:, 3] - affine_boxes[:, 1]
     keep = (w > 1.0) & (h > 1.0)
-    keys_to_filter = [
-    'boxes', 'labels', 'relative_position', 'relative_rotation', 
-    'relative_quaternions', 'object_center_2d', 'intrinsics', 
-    'model_points', 'is_symmetric', 'diameter'
-    ]
     # 4. FILTER UNIFORMLY
     if keep.any():
         # Filter metadata fields
-        for key in keys_to_filter:
+        for key in per_object_keys:
             if key in target:
                 t = target[key]
                 if isinstance(t, torch.Tensor):
                     target[key] = t[keep]
                 elif isinstance(t, list):
-                    target[key] = [item for item, k in zip(t, keep) if k]
+                    target[key] = [item for item, k in zip(t, keep) if bool(k.item())]
 
         # Process Boxes (Normalize and Save)
         kept_boxes = affine_boxes[keep]
@@ -357,11 +355,51 @@ def random_affine_single(
         )
         target['boxes'] = final_boxes / scale_tensor
 
+        # Keep pose supervision consistent with the affine-warped image.
+        if (
+            'object_center_2d' in target
+            and 'relative_position' in target
+            and 'relative_rotation' in target
+            and len(target['labels']) > 0
+        ):
+            obj_center_2d, affine_trans, affine_rot = apply_affine_to_object_pose(
+                obj_center_2d=target['object_center_2d'].detach().cpu().numpy().copy(),
+                rotation=target['relative_rotation'].detach().cpu().numpy().copy(),
+                translation=target['relative_position'].detach().cpu().numpy().copy(),
+                M=M,
+                K=K,
+                scale=scale,
+                angle=angle,
+                im_size=(target_size[1], target_size[0])
+            )
+
+            obj_center_2d = torch.from_numpy(obj_center_2d).to(device=device, dtype=torch.float32)
+            obj_center_2d = obj_center_2d / torch.tensor([img.shape[1], img.shape[0]], device=device, dtype=torch.float32)
+            target['object_center_2d'] = obj_center_2d
+            target['relative_position'] = torch.from_numpy(affine_trans).to(device=device, dtype=torch.float32)
+            target['relative_rotation'] = torch.from_numpy(affine_rot).to(device=device, dtype=torch.float32)
+            target['relative_translation_z'] = target['relative_position'][:, 2] / 2.5
+
+            if 'relative_rotation_gs' in target:
+                target['relative_rotation_gs'] = rotation_matrix_to_gram_schmidt_6d(target['relative_rotation'])
+            if 'relative_quaternions' in target:
+                quat = rot2quat(target['relative_rotation'].detach().cpu().numpy())
+                target['relative_quaternions'] = torch.from_numpy(quat).to(device=device, dtype=torch.float32)
+            if 'relative_rotation_sarr' in target:
+                sarr_sym_v = target.get('sarr_sym_v', get_sarr_symmetry_vectors(target['labels']))
+                sarr_sym_v = sarr_sym_v.to(device=device, dtype=torch.long)
+                target['sarr_sym_v'] = sarr_sym_v
+                target['relative_rotation_sarr'] = rotation_matrix_to_sarr(
+                    target['relative_rotation'],
+                    sarr_sym_v,
+                    clamp=True,
+                )
+
     else:
         # Handle empty case (no valid boxes left)
         target['boxes'] = torch.zeros((0, 4), device=device)
         # Clear other fields
-        for key in keys_to_filter: 
+        for key in per_object_keys: 
             if key in target:
                 t = target[key]
                 if isinstance(t, torch.Tensor):
@@ -378,32 +416,10 @@ def random_affine_single(
                 img=debug_img,
                 boxes=affine_boxes,
                 labels=target['labels'],
-                out_path=Path(DEBUG_OUT,"after_random_affine",f"bboxes_ids_{i}.png")
+                out_path=Path(DEBUG_OUT,"after_random_affine","bboxes_ids.png")
             )
             
-        assert len(affine_boxes) == len(target['labels']), f"Mismatch: boxes {len(affine_boxes)} vs labels {len(target['labels'])}"
-        #Convert back to normalized xywh and update target['boxes']
-        affine_boxes = box_xyxy_to_cxcywh(affine_boxes)
-        affine_boxes = affine_boxes / torch.tensor([img.shape[1], img.shape[0], img.shape[1], img.shape[0]], dtype=torch.float32)   
-        
-        obj_center_2d, affine_trans, affine_rot = apply_affine_to_object_pose(obj_center_2d=target["object_center_2d"].numpy(),
-                                                                                rotation=target["relative_rotation"].numpy(),
-                                                                                translation=target["relative_position"].numpy(),
-                                                                                M=M,
-                                                                                K=K,
-                                                                                scale=scale, 
-                                                                                angle=angle,
-                                                                                im_size=(target_size[1],target_size[0])
-                                                                                )
-        
-        target["boxes"] = affine_boxes
-        # Normalize Object centers to (0,1)
-        obj_center_2d = torch.from_numpy(obj_center_2d).to(torch.float32)
-        obj_center_2d = obj_center_2d / torch.tensor([img.shape[1], img.shape[0],], dtype=torch.float32)
-        # Finally update the target and image_tensor and return
-        target['object_center_2d'] = obj_center_2d
-        target['relative_position'] = torch.from_numpy(affine_trans)
-        target['relative_rotation'] = torch.from_numpy(affine_rot)
+        assert len(target['boxes']) == len(target['labels']), f"Mismatch: boxes {len(target['boxes'])} vs labels {len(target['labels'])}"
         if DEBUG:
             
             debug_img_2 = img.copy()

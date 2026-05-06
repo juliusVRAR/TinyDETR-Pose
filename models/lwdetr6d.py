@@ -1970,7 +1970,13 @@ def build(args):
     # For more details on this, check the following discussion
     # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
     
-    num_classes = args.num_classes +1 if args.dataset_file != 'ycbv' else 22
+    configured_num_classes = getattr(args, 'num_classes', getattr(args, 'n_classes', None))
+    if args.dataset_file == 'ycbv':
+        num_classes = 22
+    elif configured_num_classes is not None:
+        num_classes = configured_num_classes + 1
+    else:
+        raise AttributeError("Expected args.num_classes or args.n_classes for non-YCBV datasets.")
     
     device = torch.device(args.device)
 

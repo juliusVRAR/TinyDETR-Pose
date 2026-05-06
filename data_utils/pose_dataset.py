@@ -502,6 +502,7 @@ class ProcessPoseData(object):
         rel_position = None
         rel_quaternion = None
         rel_rotation = None
+        rel_gs_rotation = None
         if 'relative_pose' in anno[0]:
             if 'position' in anno[0]['relative_pose']:
                 rel_position = [obj["relative_pose"]['position'] for obj in anno]

@@ -416,7 +416,7 @@ def get_args_parser():
                         help='Defines whether the transformer reference points are learned or extracted from the bounding boxes')
     parser.add_argument('--class_mode', default='specific', type=str, choices=('agnostic', 'specific'),
                         help="Determine whether PoET ist trained class-specific or class-agnostic")
-    parser.add_argument('--rotation_representation', default='6d', type=str, choices=('6d', 'sarr', 'quat', 'silho_quat'),
+    parser.add_argument('--rotation_representation', default='6d', type=str, choices=('6d', 'sarr'),
                         help="Determine the rotation representation with which PoET is trained.")
     
     parser.add_argument('--query_embedding', default='bbox', type=str, choices=('bbox', 'learned'),
