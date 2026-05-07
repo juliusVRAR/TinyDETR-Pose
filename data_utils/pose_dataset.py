@@ -543,11 +543,20 @@ class ProcessPoseData(object):
         # ------------------------------------------------------------------
         object_center_2d = None
         if rel_position is not None:
-            fx = self.camera['fx']; fy = self.camera['fy']
-            cx = self.camera['cx']; cy = self.camera['cy']
-            X = rel_position[:, 0] * 1000.0
-            Y = rel_position[:, 1] * 1000.0
-            Z = rel_position[:, 2].clamp(min=1e-6) * 1000.0
+            if intrinsics is not None:
+                K = intrinsics.reshape(-1, 3, 3)
+                fx = K[:, 0, 0]
+                fy = K[:, 1, 1]
+                cx = K[:, 0, 2]
+                cy = K[:, 1, 2]
+            else:
+                fx = rel_position.new_full((rel_position.shape[0],), float(self.camera['fx']))
+                fy = rel_position.new_full((rel_position.shape[0],), float(self.camera['fy']))
+                cx = rel_position.new_full((rel_position.shape[0],), float(self.camera['cx']))
+                cy = rel_position.new_full((rel_position.shape[0],), float(self.camera['cy']))
+            X = rel_position[:, 0]
+            Y = rel_position[:, 1]
+            Z = rel_position[:, 2].clamp(min=1e-6)
             u = fx * (X / Z) + cx
             v = fy * (Y / Z) + cy
             object_center_2d = torch.stack([u, v], dim=1)  # pixels

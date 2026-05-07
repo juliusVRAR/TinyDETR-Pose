@@ -20,8 +20,8 @@ SARR_YCBV_SYM_V = {
     # 6:  (0, 1, 1000),   # 007_tuna_fish_can    (nothing in JSON)
     13: (1, 1, 1000),  # 024_bowl
     16: (1, 1, 4),     # 036_wood_block
-    19: (1, 2, 1),     # 051_large_clamp
-    20: (1, 2, 1),     # 052_extra_large_clamp
+    19: (1, 1, 2),     # 051_large_clamp
+    20: (1, 1, 2),     # 052_extra_large_clamp
     21: (1, 1, 2),     # 061_foam_brick
 }
 _SARR_YCBV_SYM_TABLE = torch.ones(max(SARR_YCBV_SYM_V) + 1, 3, dtype=torch.long)
@@ -950,9 +950,10 @@ def sarr_to_rotation_matrix(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Te
     Decode 6D SARR vectors ordered as [s_a, c_a, s_b, c_b, s_g, c_g]
     into canonical rotation matrices.
 
-    Network predictions are normalized per SARR column before decoding, as in
-    the SARR paper. For symmetry classes whose sine terms are scaled by nu
-    factors, the inverse must undo that scaling before recovering the angle.
+    Network predictions are normalized per SARR column before decoding. For
+    symmetry classes whose sine terms are scaled by nu factors, undo that
+    scaling before applying atan2 so the inverse remains invariant to the
+    normalization step.
     """
     if sarr.shape[-1] != 6:
         raise ValueError(f"Expected (..., 6), got {tuple(sarr.shape)}")
@@ -977,6 +978,9 @@ def sarr_to_rotation_matrix(sarr: torch.Tensor, sym_v: torch.Tensor) -> torch.Te
     y_only = (flat_sym_v[:, 1] > 1) & (flat_sym_v[:, 0] == 1) & (flat_sym_v[:, 2] == 1)
     x_only = (flat_sym_v[:, 0] > 1) & (flat_sym_v[:, 1] == 1) & (flat_sym_v[:, 2] == 1)
     mixed = ~(all_one | z_only | y_only | x_only)
+    unsupported = mixed & (flat_sym_v == 1).any(dim=-1)
+    if unsupported.any():
+        raise NotImplementedError("SARR mixed symmetry with a unit axis is not supported in this refactor.")
 
     k0 = flat_sym_v[:, 0].to(dtype=sarr.dtype)
     k1 = flat_sym_v[:, 1].to(dtype=sarr.dtype)

@@ -101,7 +101,6 @@ class LWDETR6D(nn.Module):
         self.t_dim = 3
         self.xy_dim = 2
         self.z_dim = 2
-        self.max_depth = 2.5 # TODO: derive from dataset / input
         if self.rotation_mode in {'6d', 'sarr'}:
             self.rot_dim = 6
         else:
@@ -157,6 +156,10 @@ class LWDETR6D(nn.Module):
                 [copy.deepcopy(self.dec_trans_z_head) for _ in range(group_detr)])
 
         self._export = False
+
+    @staticmethod
+    def _log_depth(raw_z):
+        return raw_z, raw_z.exp()
     
     def export(self):
         self._export = True
@@ -192,9 +195,7 @@ class LWDETR6D(nn.Module):
         # ---------------------------------------------------------
         z_layer = get_last_linear_layer(self.dec_trans_z_head)
         
-        # Channel 0: Normalized Depth (Sigmoid output)
-        # Setting bias to 0.0 -> Sigmoid(0.0) = 0.5
-        # 0.5 * Max_Depth (2.5m) = 1.25m (Safe mean guess for YCB-V)
+        # Channel 0: log-depth. Bias 0.0 initializes metric depth to exp(0) = 1m.
         nn.init.constant_(z_layer.bias[0], 0.0)
         
         # Channel 1: Log Uncertainty 's' (Linear output)
@@ -394,11 +395,10 @@ class LWDETR6D(nn.Module):
         # Prepare pred translation z for monocular depth estimation.
         z_out = self.dec_trans_z_head(output_trans)
         # Split the output:
-        # Channel 0: Normalized Depth (Sigmoid -> 0 to 1)
-        output_norm_z = z_out[..., 0].sigmoid()
+        # Channel 0: log-depth, converted back to meters for pose geometry.
+        output_log_z, pred_tz = self._log_depth(z_out[..., 0])
         # Channel 1: Uncertainty (Log Variance) - No activation needed
         output_z_log_var = z_out[..., 1]
-        pred_tz = output_norm_z * self.max_depth # Pred z in meters
         # Use the valid image region per sample rather than reusing sample 0 for the whole batch.
         if samples.mask is not None:
             valid_mask = ~samples.mask
@@ -431,11 +431,11 @@ class LWDETR6D(nn.Module):
             fy = K['fy']
             cx = K['cx']
             cy = K['cy']
-            pred_tz = pred_tz.unsqueeze(-1)  # Add batch dim for broadcasting
+            pred_tz_for_backproject = pred_tz.unsqueeze(-1)
             # Apply Pinhole Formula to get x,y in meters
-            pred_tx = (u - cx) * pred_tz / fx
-            pred_ty = (v - cy) * pred_tz / fy
-            output_trans = torch.cat([pred_tx, pred_ty, pred_tz], dim=-1)
+            pred_tx = (u - cx) * pred_tz_for_backproject / fx
+            pred_ty = (v - cy) * pred_tz_for_backproject / fy
+            output_trans = torch.cat([pred_tx, pred_ty, pred_tz_for_backproject], dim=-1)
 
         # Postprocess output_rots for loss
         output_rots = self.process_rotation(pred_rots)
@@ -444,7 +444,8 @@ class LWDETR6D(nn.Module):
                'pred_rotations': output_rots[-1],
                'pred_translations': output_trans[-1],   
                'pred_uv_norm': output_uv_norm[-1],
-               'pred_trans_z': output_norm_z[-1],            # Normalized z input for Laplacian Loss 
+               'pred_trans_z': pred_tz[-1],
+               'pred_log_trans_z': output_log_z[-1],
                'pred_z_log_var': output_z_log_var[-1],      # Input for Laplacian Loss
                }
         
@@ -455,12 +456,14 @@ class LWDETR6D(nn.Module):
                                                     output_trans,
                                                     output_uv_norm,
                                                     output_z_log_var,
-                                                    output_norm_z
+                                                    pred_tz,
+                                                    output_log_z
                                                     )
 
         if self.two_stage:
             hs_enc_list = hs_enc.split(self.num_queries, dim=1)
-            cls_enc, rot_enc_list, trans_enc_list, kpt_enc_list, log_var_z_list, trans_enc_z_list = [], [], [], [], [], []
+            cls_enc, rot_enc_list, trans_enc_list, kpt_enc_list = [], [], [], []
+            log_var_z_list, trans_enc_z_list, log_trans_enc_z_list = [], [], []
             group_detr = self.group_detr if self.training else 1
             for g_idx in range(group_detr):
                 enc_feat = hs_enc_list[g_idx]
@@ -476,11 +479,10 @@ class LWDETR6D(nn.Module):
                 # Prepare pred translation z for monocular depth estimation.
                 z_out_enc = (self.transformer.enc_out_trans_z_embed[g_idx](trans_enc))
                 # Split the output:
-                # Channel 0: Normalized Depth (Sigmoid -> 0 to 1)
-                norm_z_enc = z_out_enc[..., 0].sigmoid()
+                # Channel 0: log-depth, converted back to meters for pose geometry.
+                log_z_enc, trans_enc_z = self._log_depth(z_out_enc[..., 0])
                 # Channel 1: Uncertainty (Log Variance) - No activation needed
                 z_log_var_enc = z_out_enc[..., 1]
-                trans_enc_z = norm_z_enc * self.max_depth # Pred z in meters
                 
                 if len(samples.meta) != 0:
                     trans_enc_x = (u.squeeze(-1) - cx.squeeze(0)) * trans_enc_z / fx.squeeze(0)
@@ -496,12 +498,14 @@ class LWDETR6D(nn.Module):
                 trans_enc_list.append(trans_enc)
                 log_var_z_list.append(z_log_var_enc)
                 trans_enc_z_list.append(trans_enc_z)
+                log_trans_enc_z_list.append(log_z_enc)
             cls_enc = torch.cat(cls_enc, dim=1)
             rot_enc = torch.cat(rot_enc_list, dim=1)            # (B, total_queries, rot_dim)
             
             trans_enc = torch.cat(trans_enc_list, dim=1)      # (B, total_queries, 3)
             z_log_var_enc = torch.cat(log_var_z_list, dim=1)  # (B, total_queries, 1)
             trans_enc_z = torch.cat(trans_enc_z_list, dim=1)  # (B, total_queries, 1)
+            log_trans_enc_z = torch.cat(log_trans_enc_z_list, dim=1)
             kpt_enc = torch.cat(kpt_enc_list, dim=1)          # (B, total_queries, 2)
             
             rot_enc_full = self.process_rotation(rot_enc)
@@ -512,7 +516,8 @@ class LWDETR6D(nn.Module):
                 'pred_translations': trans_enc,
                 'pred_uv_norm': kpt_enc,
                 'pred_z_log_var': z_log_var_enc,
-                'pred_trans_z': trans_enc_z
+                'pred_trans_z': trans_enc_z,
+                'pred_log_trans_z': log_trans_enc_z
             }
         return out
 
@@ -538,7 +543,7 @@ class LWDETR6D(nn.Module):
         return outputs_coord, outputs_class
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord, output_rots, output_trans, output_uv_norm, output_z_log_var, output_trans_z):
+    def _set_aux_loss(self, outputs_class, outputs_coord, output_rots, output_trans, output_uv_norm, output_z_log_var, output_trans_z, output_log_trans_z):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
@@ -548,15 +553,17 @@ class LWDETR6D(nn.Module):
                  'pred_translations': d, 
                  'pred_uv_norm': e, 
                  'pred_z_log_var': f, 
-                 'pred_trans_z': g}
+                 'pred_trans_z': g,
+                 'pred_log_trans_z': h}
 
-                for a, b, c, d, e, f, g in zip(outputs_class[:-1], 
-                                               outputs_coord[:-1], 
-                                               output_rots[:-1], 
-                                               output_trans[:-1], 
-                                               output_uv_norm[:-1], 
-                                               output_z_log_var[:-1], 
-                                               output_trans_z[:-1])]
+                for a, b, c, d, e, f, g, h in zip(outputs_class[:-1], 
+                                                  outputs_coord[:-1], 
+                                                  output_rots[:-1], 
+                                                  output_trans[:-1], 
+                                                  output_uv_norm[:-1], 
+                                                  output_z_log_var[:-1], 
+                                                  output_trans_z[:-1],
+                                                  output_log_trans_z[:-1])]
 
     def update_drop_path(self, drop_path_rate, vit_encoder_num_layers):
         """ """
@@ -632,6 +639,7 @@ class SetCriterion(nn.Module):
         self.mae_loss = nn.L1Loss(reduction="none")
         self.mse_loss = nn.MSELoss(reduction="none")
         self.shape_loss = False
+        self.depth_eps = 1e-6
 
     def _matched_target_labels(self, targets, indices):
         return torch.cat([t["labels"][i] for t, (_, i) in zip(targets, indices)], dim=0)
@@ -1038,12 +1046,16 @@ class SetCriterion(nn.Module):
                     indices,
                     num_boxes):
         idx = self._get_src_permutation_idx(indices)
-        pred_trans_z = outputs['pred_translations'][idx][:, -1]
+        if 'pred_log_trans_z' in outputs:
+            pred_log_z = outputs['pred_log_trans_z'][idx]
+        else:
+            pred_log_z = torch.log(outputs['pred_translations'][idx][:, -1].clamp_min(self.depth_eps))
         tgt_trans_z = torch.cat(
             [t['relative_position'][i] for t, (_, i) in zip(targets, indices)],
             dim=0
         )[:, -1]
-        loss_trans_z = F.smooth_l1_loss(pred_trans_z, tgt_trans_z, reduction='sum') / num_boxes
+        tgt_log_z = torch.log(tgt_trans_z.clamp_min(self.depth_eps))
+        loss_trans_z = F.smooth_l1_loss(pred_log_z, tgt_log_z, reduction='sum') / num_boxes
         return {'loss_trans_z': loss_trans_z}
     
     def loss_trans_z_l2(self, outputs, targets, indices, num_boxes):
@@ -1137,8 +1149,7 @@ class SetCriterion(nn.Module):
         loss_trans = self.mae_loss(src_trans[:, :2], tgt_trans[:, :2]).sum() / num_boxes
         return {'loss_trans_xy': loss_trans}
     
-    # The following trans_z losses expect z in normalized 0-1 space
-    # Log-L1 Loss (Ablation Experiment)
+    # Log-depth L1 Loss (Ablation Experiment)
     def loss_relative_log_l1(self, pred_z_meters, gt_z_meters):
         """
         Computes L1 loss in Log Space. 
@@ -1167,8 +1178,8 @@ class SetCriterion(nn.Module):
         # # OPTION A: Laplacian Uncertainty
         # # -------------------------------------------------------------
         # # 1. Get Predictions (Specific to Z and Uncertainty)
-        # # We use the Normalized Z (0-1) for stability
-        # src_norm_z = outputs['pred_trans_z'][idx] # Normalized between 0-1
+        # # We use log-depth for stability
+        # src_log_z = outputs['pred_log_trans_z'][idx]
         # # Get the Log Variance (s)
         # src_log_var = outputs['pred_z_log_var'][idx]
         # # safety guardrail because we are useing exp(-s) -> can explode/NaN
@@ -1309,22 +1320,25 @@ class SetCriterion(nn.Module):
         idx = self._get_src_permutation_idx(indices)
 
         # ---------------------------------------------------------------
-        # OPTION A: Laplacian Uncertainty (normalized Z, unitless)
+        # OPTION A: Laplacian Uncertainty in log-depth space
         # ---------------------------------------------------------------
-        src_norm_z  = outputs['pred_trans_z'][idx]
+        src_log_z = outputs['pred_log_trans_z'][idx]
         src_log_var = outputs['pred_z_log_var'][idx]
         src_log_var = torch.clamp(src_log_var, min=-10.0, max=10.0)
 
-        tgt_trans_z = torch.cat([t['relative_translation_z'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        tgt_trans_z = torch.cat(
+            [t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0
+        )[:, 2]
+        tgt_log_z = torch.log(tgt_trans_z.clamp_min(self.depth_eps))
 
-        l1_error = torch.abs(src_norm_z - tgt_trans_z)
+        l1_error = torch.abs(src_log_z - tgt_log_z)
         loss = (l1_error * torch.exp(-src_log_var)) + src_log_var
         loss = loss.sum() / num_boxes
 
         # ---------------------------------------------------------------
         # OPTION B: Smooth L1 on log(Z) — Ablation (no uncertainty)
         # ---------------------------------------------------------------
-        # src_z_meters = outputs['pred_tz_meters'][idx]                    # already scaled by max_depth
+        # src_z_meters = outputs['pred_trans_z'][idx]                    # metric depth from exp(log_z)
         # tgt_trans    = torch.cat([t['relative_position'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         # tgt_z_meters = tgt_trans[:, 2]
         # loss         = self.loss_relative_log_l1(src_z_meters, tgt_z_meters) / num_boxes
@@ -1335,8 +1349,8 @@ class SetCriterion(nn.Module):
         # Both tensors come directly from your MLP's two output channels —
         # no extra head needed, your z_dim=2 design already encodes this.
         # ---------------------------------------------------------------
-        # # 1. Channel 0 — metric Z (sigmoid * max_depth already applied in forward)
-        # src_z_meters = outputs['pred_tz_meters'][idx]                    # (N,)
+        # # 1. Channel 0 — log-depth
+        # src_log_z = outputs['pred_log_trans_z'][idx]                    # (N,)
 
         # # 2. Channel 1 — log σ², clamp BEFORE passing to loss helper
         # src_log_var  = outputs['pred_z_log_var'][idx].squeeze(-1)        # (N,)
@@ -1541,7 +1555,7 @@ class SetCriterion(nn.Module):
             loss_kpt_dict = self.loss_keypoint_oks(outputs, targets, indices, num_boxes)
             # L1 loss for translation xy in meters.
             #loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
-            loss_trans_z = self.loss_trans_z(outputs, targets, indices, num_boxes)
+            loss_trans_z = self.loss_trans_z_smooth_l1(outputs, targets, indices, num_boxes)
             
             # Extract loss values
             loss_adds = loss_adds_dict['loss_adds']
