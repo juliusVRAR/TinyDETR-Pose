@@ -20,8 +20,8 @@ SARR_YCBV_SYM_V = {
     # 6:  (0, 1, 1000),   # 007_tuna_fish_can    (nothing in JSON)
     13: (1, 1, 1000),  # 024_bowl
     16: (1, 1, 4),     # 036_wood_block
-    19: (1, 1, 2),     # 051_large_clamp
-    20: (1, 1, 2),     # 052_extra_large_clamp
+    19: (1, 2, 1),     # 051_large_clamp
+    20: (1, 2, 1),     # 052_extra_large_clamp
     21: (1, 1, 2),     # 061_foam_brick
 }
 _SARR_YCBV_SYM_TABLE = torch.ones(max(SARR_YCBV_SYM_V) + 1, 3, dtype=torch.long)
