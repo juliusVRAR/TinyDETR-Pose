@@ -14,6 +14,8 @@ COEF_BBOX=$8
 COEF_GIOU=$9
 RUN_ID=${10}
 JOB_NAME=${11}
+ROT_REP=${12:-${ROT_REP:-6d}}
+WARM_UP_EPOCHS=${13:-${WARM_UP_EPOCHS:-0}}
 
 if [ -z "$RUN_ID" ]; then
   RUN_ID=no_slurm_id
@@ -27,9 +29,9 @@ python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
                 /workspace/LWDETR/main.py \
-                            --lr 2e-4 \
+                            --lr 1e-4 \
                             --lr_transformer 2e-5 \
-                            --lr_encoder 1e-5 \
+                            --lr_encoder 1.5e-4 \
                             --lr_backbone 1e-6 \
                             --weight_decay 1e-4 \
                             --lr_drop 55 \
@@ -76,9 +78,10 @@ python -u -m torch.distributed.launch \
                             --bbox_loss_coef $COEF_BBOX \
                             --giou_loss_coef $COEF_GIOU \
                             --output_dir $OUTPUT_DIR \
-                            --warm_up_epochs 0 \
+                            --warm_up_epochs $WARM_UP_EPOCHS \
                             --quick_eval \
-                            --rotation_representation sarr \
-                            --reduce_det_loss_epochs 50
+                            --rotation_representation $ROT_REP \
+                            --reduce_det_loss_epochs 50000000
+
                              
                             

@@ -3,7 +3,7 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=64G
-#SBATCH --time=96:00:00
+#SBATCH --time=80:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
 #SBATCH --export=SLURM_OUT=not_called_from_exp
@@ -100,7 +100,7 @@ rootless-docker run --gpus all --shm-size=256g \
     -v $PATH_TO_WEIGHTS:/workspace/LWDETR/data/weights \
     pc3163.igd.fraunhofer.de:4567/$IMAGE_NAME\
     bash -c "python /workspace/LWDETR/models/ops/setup.py build install && \
-                /workspace/LWDETR/scripts/pose/$MODEL/$TASK.sh $NUM_GPUS $COEF_KPT $COEF_TRANS_XY $COEF_TRANS_Z $COEF_ROT $COEF_ADDS $COEF_CLAS $COEF_BBOX $COEF_GIOU $SLURM_JOB_ID $JOB_NAME"
+                /workspace/LWDETR/scripts/pose/$MODEL/$TASK.sh $NUM_GPUS $COEF_KPT $COEF_TRANS_XY $COEF_TRANS_Z $COEF_ROT $COEF_ADDS $COEF_CLAS $COEF_BBOX $COEF_GIOU $SLURM_JOB_ID $JOB_NAME $ROT_REP $WARM_UP_EPOCHS"
                                     
         
 ## OUTPUT
