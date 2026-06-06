@@ -49,6 +49,8 @@ def load_models(path, classes):
         model_class = classes[cls]
         model_file = "obj_" + f'{int(cls):06d}' + ".ply"
         model = model_tools.load_ply(path + model_file)
+        if not 'texture_file' in model: 
+            print(f"{model_file} has no texture")
         models[model_class] = model
         models[model_class]['pts'] = models[model_class]['pts'] / 1000  # Scale the model to meters.
         models_info[model_class] = models_info_data[cls]
