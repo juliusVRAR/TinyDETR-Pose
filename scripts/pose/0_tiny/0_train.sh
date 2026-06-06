@@ -16,6 +16,15 @@ RUN_ID=${10}
 JOB_NAME=${11}
 ROT_REP=${12:-${ROT_REP:-6d}}
 WARM_UP_EPOCHS=${13:-${WARM_UP_EPOCHS:-0}}
+MATCHER_TYPE=${14:-${MATCHER_TYPE:-6d}}
+REDUCE_DET_LOSS_EPOCHS=${15:-${REDUCE_DET_LOSS_EPOCHS:-50000000}}
+SET_COST_CLASS=${16:-${SET_COST_CLASS:-2.0}}
+SET_COST_BBOX=${17:-${SET_COST_BBOX:-5.0}}
+SET_COST_GIOU=${18:-${SET_COST_GIOU:-1.0}}
+SET_COST_ROT=${19:-${SET_COST_ROT:-2.0}}
+SET_COST_TRANS=${20:-${SET_COST_TRANS:-5.0}}
+SET_COST_KPT=${21:-${SET_COST_KPT:-5.0}}
+MATCHER_SYMMETRY_STRIDE=${22:-${MATCHER_SYMMETRY_STRIDE:-1}}
 
 if [ -z "$RUN_ID" ]; then
   RUN_ID=no_slurm_id
@@ -63,10 +72,17 @@ python -u -m torch.distributed.launch \
                             --dataset_path $dataset_path \
                             --pretrained_encoder /workspace/LWDETR/data/weights/caev2_tiny_S_300e_objects365.pth \
                             --pretrain_weights /workspace/LWDETR/data/weights/LWDETR_tiny_30e_objects365.pth \
-                            --epochs 80 \
+                            --epochs 100 \
                             --num_select 100 \
                             --num_queries 100 \
-                            --matcher_type "6d" \
+                            --matcher_type $MATCHER_TYPE \
+                            --set_cost_class $SET_COST_CLASS \
+                            --set_cost_bbox $SET_COST_BBOX \
+                            --set_cost_giou $SET_COST_GIOU \
+                            --set_cost_rotation $SET_COST_ROT \
+                            --set_cost_translation $SET_COST_TRANS \
+                            --set_cost_keypoint $SET_COST_KPT \
+                            --matcher_symmetry_stride $MATCHER_SYMMETRY_STRIDE \
                             --batch_size 16 \
                             --n_mesh_points 512 \
                             --keypoint_loss_coef $COEF_KPT \
@@ -81,7 +97,7 @@ python -u -m torch.distributed.launch \
                             --warm_up_epochs $WARM_UP_EPOCHS \
                             --quick_eval \
                             --rotation_representation $ROT_REP \
-                            --reduce_det_loss_epochs 50000000
+                            --reduce_det_loss_epochs $REDUCE_DET_LOSS_EPOCHS
 
                              
                             

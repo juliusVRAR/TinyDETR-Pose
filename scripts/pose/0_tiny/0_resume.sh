@@ -15,9 +15,11 @@ COEF_GIOU=$9
 RUN_ID=${10}
 JOB_NAME=${11}
 
-# Set this to the checkpoint you want to resume from.
-RESUME_CKPT=/workspace/LWDETR/output/debug_lwdetr_tiny/checkpoint.pth
+ROT_REP=${12:-${ROT_REP:-6d}}
+WARM_UP_EPOCHS=${13:-${WARM_UP_EPOCHS:-0}}
 
+# Set this to the checkpoint you want to resume from.
+RESUME_CKPT=/workspace/LWDETR/output/pose/0_tiny/80644/_train_tiny_sarr_z15.0_r1.5_adds7.5_wu1_obj365_21:39:46-2026-05-29/checkpoint0009_new.pth
 if [ -z "$RUN_ID" ]; then
   RUN_ID=no_slurm_id
 fi
@@ -36,10 +38,10 @@ python -u -m torch.distributed.launch \
                 /workspace/LWDETR/main.py \
                             --lr 1e-4 \
                             --lr_transformer 2e-5 \
-                            --lr_encoder 1e-5 \
+                            --lr_encoder 1.5e-4 \
                             --lr_backbone 1e-6 \
                             --weight_decay 1e-4 \
-                            --lr_drop 50 \
+                            --lr_drop 55 \
                             --lr_vit_layer_decay 0.8 \
                             --lr_component_decay 0.7 \
                             --encoder vit_tiny \
@@ -72,8 +74,8 @@ python -u -m torch.distributed.launch \
                             --num_select 100 \
                             --num_queries 50 \
                             --matcher_type "6d" \
-                            --batch_size 1 \
-                            --n_mesh_points 1024 \
+                            --batch_size 16 \
+                            --n_mesh_points 512 \
                             --keypoint_loss_coef $COEF_KPT \
                             --trans_z_loss_coef $COEF_TRANS_Z \
                             --trans_xy_loss_coef $COEF_TRANS_XY \
@@ -84,6 +86,7 @@ python -u -m torch.distributed.launch \
                             --giou_loss_coef $COEF_GIOU \
                             --output_dir $OUTPUT_DIR \
                             --resume $RESUME_CKPT \
-                            --warm_up_epochs 1 \
+                            --warm_up_epochs $WARM_UP_EPOCHS \
+                            --rotation_representation $ROT_REP \
+                            --reduce_det_loss_epochs 50000000 \
                             --quick_eval \
-                            --reduce_det_loss_epochs 60

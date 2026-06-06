@@ -406,6 +406,8 @@ def get_args_parser():
                         help="Type of matcher to use, hungarian is the 3d match from lwdetr and will probably not work")
     parser.add_argument('--ablation_topk_candidates', default=3, type=int,
                         help='Per-target top-k detection candidates forwarded to the second-stage pose matcher.')
+    parser.add_argument('--matcher_symmetry_stride', default=1, type=int,
+                        help='Use every Nth symmetry transform in pose-aware matcher rotation cost.')
     
     # PoET Config
     parser.add_argument('--bbox_mode', default='backbone', type=str, choices=('gt', 'backbone', 'jitter'),

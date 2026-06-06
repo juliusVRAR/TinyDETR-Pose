@@ -268,7 +268,8 @@ class Matcher6DRotTrans(nn.Module):
                  cost_rotation: float = 1,
                  cost_translation: float = 1,
                  cost_keypoint: float = 1,
-                 rotation_representation: str = '6d'):
+                 rotation_representation: str = '6d',
+                 matcher_symmetry_stride: int = 1):
         super().__init__()
         self.cost_class = cost_class
         self.cost_bbox = cost_bbox
@@ -277,6 +278,7 @@ class Matcher6DRotTrans(nn.Module):
         self.cost_translation = cost_translation
         self.cost_keypoint = cost_keypoint
         self.rotation_representation = rotation_representation
+        self.matcher_symmetry_stride = max(1, int(matcher_symmetry_stride))
 
         assert (
             cost_class != 0
@@ -297,6 +299,18 @@ class Matcher6DRotTrans(nn.Module):
         cos_angle = torch.clamp(cos_angle, -1.0 + eps, 1.0 - eps)
         return torch.acos(cos_angle)
 
+    @staticmethod
+    def rotation_symmetry_transform_min_cost(pred_rotations, gt_rotations, symmetry_transforms, symmetry_stride=1, eps=1e-6):
+        columns = []
+        for gt_rotation, transforms in zip(gt_rotations, symmetry_transforms):
+            transforms = transforms[::symmetry_stride]
+            equivalent_rotations = gt_rotation.unsqueeze(0) @ transforms
+            relative_rotations = pred_rotations.unsqueeze(1).transpose(-2, -1) @ equivalent_rotations.unsqueeze(0)
+            traces = relative_rotations.diagonal(dim1=-2, dim2=-1).sum(-1)
+            cos_angle = ((traces - 1.0) / 2.0).clamp(-1.0 + eps, 1.0 - eps)
+            columns.append(torch.acos(cos_angle).min(dim=1).values)
+        return torch.stack(columns, dim=1)
+
     @torch.no_grad()
     def forward(self, outputs, targets, group_detr=1):
         bs, num_queries = outputs["pred_logits"].shape[:2]
@@ -304,22 +318,11 @@ class Matcher6DRotTrans(nn.Module):
         out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)
         out_bbox = outputs["pred_boxes"].flatten(0, 1)
         out_keypoint = outputs["pred_uv_norm"].flatten(0, 1)
-        out_trans = outputs["pred_translations"].flatten(0, 1)
-        out_rot = outputs["pred_rotations"].flatten(0, 1)
+        out_trans = outputs["pred_translations"].flatten(0, 1) if self.cost_translation != 0 else None
+        out_rot = outputs["pred_rotations"].flatten(0, 1) if self.cost_rotation != 0 else None
 
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
-        tgt_trans = torch.cat([v["relative_position"] for v in targets], dim=0).to(
-            device=out_trans.device, dtype=out_trans.dtype
-        )
-        if self.rotation_representation == "sarr":
-            tgt_rot = torch.cat([v["relative_rotation_sarr"] for v in targets], dim=0).to(
-                device=out_rot.device, dtype=out_rot.dtype
-            )
-        else:
-            tgt_rot = torch.cat([v["relative_rotation"] for v in targets], dim=0).to(
-                device=out_rot.device, dtype=out_rot.dtype
-            )
 
         if ("object_center_2d" in targets[0]) and (targets[0]["object_center_2d"] is not None):
             tgt_keypoint = torch.cat([v["object_center_2d"] for v in targets], dim=0).to(
@@ -335,14 +338,40 @@ class Matcher6DRotTrans(nn.Module):
             box_cxcywh_to_xyxy(out_bbox),
             box_cxcywh_to_xyxy(tgt_bbox),
         )
-        cost_translation = torch.cdist(out_trans, tgt_trans, p=2)
-        if self.rotation_representation == "sarr":
-            cost_rotation = pairwise_cosine_distance_cost(
-                normalize_sarr_pairs(out_rot),
-                normalize_sarr_pairs(tgt_rot),
+        if self.cost_translation != 0:
+            tgt_trans = torch.cat([v["relative_position"] for v in targets], dim=0).to(
+                device=out_trans.device, dtype=out_trans.dtype
             )
+            cost_translation = torch.cdist(out_trans, tgt_trans, p=2)
         else:
-            cost_rotation = self.rotation_geodesic_distance_cost(out_rot, tgt_rot)
+            cost_translation = 0.0
+        if self.cost_rotation != 0:
+            if self.rotation_representation == "sarr":
+                tgt_rot = torch.cat([v["relative_rotation_sarr"] for v in targets], dim=0).to(
+                    device=out_rot.device, dtype=out_rot.dtype
+                )
+                cost_rotation = pairwise_cosine_distance_cost(
+                    normalize_sarr_pairs(out_rot),
+                    normalize_sarr_pairs(tgt_rot),
+                )
+            else:
+                tgt_rot = torch.cat([v["relative_rotation"] for v in targets], dim=0).to(
+                    device=out_rot.device, dtype=out_rot.dtype
+                )
+                if "symmetry_transforms" in targets[0]:
+                    tgt_symmetry_transforms = torch.cat([v["symmetry_transforms"] for v in targets], dim=0).to(
+                        device=out_rot.device, dtype=out_rot.dtype
+                    )
+                    cost_rotation = self.rotation_symmetry_transform_min_cost(
+                        out_rot,
+                        tgt_rot,
+                        tgt_symmetry_transforms,
+                        symmetry_stride=self.matcher_symmetry_stride,
+                    )
+                else:
+                    cost_rotation = self.rotation_geodesic_distance_cost(out_rot, tgt_rot)
+        else:
+            cost_rotation = 0.0
 
         C = (
             self.cost_bbox * cost_bbox
@@ -712,6 +741,7 @@ def build_matcher(args):
             cost_translation=args.set_cost_translation,
             cost_keypoint=args.set_cost_keypoint,
             rotation_representation=args.rotation_representation,
+            matcher_symmetry_stride=getattr(args, 'matcher_symmetry_stride', 1),
         )
     elif args.matcher_type == 'ablation':
         return MatcherAblation(

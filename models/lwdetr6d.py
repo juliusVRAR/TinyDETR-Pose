@@ -1055,7 +1055,9 @@ class SetCriterion(nn.Module):
             dim=0
         )[:, -1]
         tgt_log_z = torch.log(tgt_trans_z.clamp_min(self.depth_eps))
-        loss_trans_z = F.smooth_l1_loss(pred_log_z, tgt_log_z, reduction='sum') / num_boxes
+
+        loss_trans_z = F.smooth_l1_loss(pred_log_z, tgt_log_z, beta=0.01, reduction='sum') / num_boxes
+        #loss_trans_z = F.l1_loss(pred_log_z, tgt_log_z, reduction='sum') / num_boxes
         return {'loss_trans_z': loss_trans_z}
     
     def loss_trans_z_l2(self, outputs, targets, indices, num_boxes):
@@ -1310,6 +1312,30 @@ class SetCriterion(nn.Module):
         losses["loss_rot"] = rad.sum() / num_boxes
 
         return losses
+
+    def loss_rotation_symmetry_transform_min(self, outputs, targets, indices, num_boxes):
+        idx = self._get_src_permutation_idx(indices)
+
+        R_pred = self._matched_pred_rotation_matrices(outputs, targets, indices)
+        R_gt = torch.cat(
+            [t["relative_rotation"][i].float() for t, (_, i) in zip(targets, indices)],
+            dim=0,
+        ).to(device=R_pred.device, dtype=R_pred.dtype)
+
+        sym_G = torch.cat(
+            [t["symmetry_transforms"][i].float() for t, (_, i) in zip(targets, indices)],
+            dim=0,
+        ).to(device=R_pred.device, dtype=R_pred.dtype)
+
+        R_equiv = R_gt.unsqueeze(1) @ sym_G
+        R_rel = R_pred.unsqueeze(1).transpose(-2, -1) @ R_equiv
+
+        trace = R_rel.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+        cos_angle = ((trace - 1.0) / 2.0).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+        angles = torch.acos(cos_angle)
+
+        loss = angles.min(dim=1).values
+        return {"loss_rot": loss.sum() / num_boxes}
     # Test losses 
     def loss_trans_z_with_ablation(self,
                                     outputs,
@@ -1546,7 +1572,8 @@ class SetCriterion(nn.Module):
             # Symmtery aware L1 loss on 6D rotation representation with min distance for symmetric objects.
             # loss_rot_dict = self.loss_L1_rot_sym_aware_min_distance_z(outputs, targets, indices, num_boxes)
             # Geodensic Loss
-            loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rotation_symmetry_transform_min(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
             # 6D representation with L1 loss (YOLOX6D Approach)
@@ -1555,7 +1582,10 @@ class SetCriterion(nn.Module):
             loss_kpt_dict = self.loss_keypoint_oks(outputs, targets, indices, num_boxes)
             # L1 loss for translation xy in meters.
             #loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
+
+            # trans-z Losses (depth)
             loss_trans_z = self.loss_trans_z_smooth_l1(outputs, targets, indices, num_boxes)
+            #loss_trans_z= self.loss_trans_z_with_ablation(outputs, targets, indices, num_boxes)
             
             # Extract loss values
             loss_adds = loss_adds_dict['loss_adds']
@@ -1567,7 +1597,7 @@ class SetCriterion(nn.Module):
 
             # Total weighted pose loss
             loss_pose_total = (
-                #lambda_adds * loss_adds +
+                lambda_adds * loss_adds +
                 lambda_rot * loss_rot +
                 lambda_kpt * loss_kpt +
                 lambda_trans_z * loss_trans_z #+
