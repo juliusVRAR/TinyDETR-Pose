@@ -826,12 +826,12 @@ class SetCriterion(nn.Module):
                 p_sym = pts_p[sym_idx] # (S, P, 3)
                 g_sym = pts_g[sym_idx] # (S, P, 3)
 
-                # Compute pairwise distance matrix (S, P, P)
-                # This finds the closest point on GT for every point on Pred
+                # Compute pairwise distance matrix (S, P_pred, P_gt)
+                # Match evaluator direction: nearest predicted point for every GT point.
                 pairwise_dist = torch.cdist(p_sym, g_sym, p=2)
                 
-                # Min over GT points (dim 2), then Mean over Pred points (dim 1)
-                min_dists = pairwise_dist.min(dim=2).values.mean(dim=1)
+                # Min over predicted points, then mean over GT points.
+                min_dists = pairwise_dist.min(dim=1).values.mean(dim=1)
                 
                 # Overwrite the standard ADD distances with ADD-S distances
                 dists[sym_idx] = min_dists
@@ -878,7 +878,7 @@ class SetCriterion(nn.Module):
         sym_idx = torch.where(sym)[0]
         p_sym = pts_p[sym_idx]
         g_sym = pts_g[sym_idx]
-        min_dists = torch.cdist(p_sym, g_sym, p=2).min(dim=2).values.mean(dim=1)
+        min_dists = torch.cdist(p_sym, g_sym, p=2).min(dim=1).values.mean(dim=1)
         dists[sym_idx] = min_dists
 
         loss_adds = dists.sum() / max(num_boxes, 1)
@@ -1485,8 +1485,8 @@ class SetCriterion(nn.Module):
                 pts_g_sym = torch.bmm(R_g_sym, pts_sym.transpose(1, 2)).transpose(1, 2) \
                             + t_g_sym.unsqueeze(1)              # (S, P, 3)
 
-                pairwise  = torch.cdist(pts_p_sym, pts_g_sym, p=2)             # (S, P, P)
-                loss_adds = pairwise.min(dim=2).values.mean(dim=1).sum()       # scalar
+                pairwise  = torch.cdist(pts_p_sym, pts_g_sym, p=2)             # (S, P_pred, P_gt)
+                loss_adds = pairwise.min(dim=1).values.mean(dim=1).sum()       # scalar
 
         # ── Aggregate & normalize ────────────────────────────────────────
         safe_num_boxes = max(num_boxes, 1)

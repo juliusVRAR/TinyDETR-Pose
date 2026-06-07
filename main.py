@@ -511,7 +511,7 @@ def get_args_parser():
                         help="Epoch interval after which the current model is evaluated")
     parser.add_argument('--class_info', type=str, default='/annotations/classes.json',
                         help='path to .txt-file containing the class names')
-    parser.add_argument('--models', type=str, default='/models_eval/',
+    parser.add_argument('--models', type=str, default='/models/',
                         help='path to a directory containing the classes models')
     parser.add_argument('--model_symmetry', type=str, default='/annotations/symmetries.json',
                         help='path to .json-file containing the class symmetries')
