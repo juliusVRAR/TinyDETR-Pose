@@ -166,6 +166,7 @@ def write_summary_run_config(summary_log_path: Path, args, criterion) -> None:
         'timestamp': str(datetime.datetime.now()),
         'dataset_file': args.dataset_file,
         'train_set': args.train_set,
+        'models': args.models,
         'eval_set': args.eval_set,
         'loss_config': get_loss_configuration(args, criterion),
         'evaluation_config': {
