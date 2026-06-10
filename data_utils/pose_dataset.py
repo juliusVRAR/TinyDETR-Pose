@@ -862,15 +862,14 @@ def build(image_set, args):
         "val": (root , root / "annotations" / f'val.json'),
     }
     if args.models:
-        cad_model_path = Path(str(root) + args.models)
+        models_arg = str(args.models)
+        cad_model_path = Path(str(root) + models_arg) if models_arg.startswith("/") else Path(root, models_arg)
     else:
         cad_model_path = Path(root, "models")
 
     if not cad_model_path.exists():
-        fallback_cad_model_path = Path(root, "models")
-        if fallback_cad_model_path.exists():
-            print(f"CAD model path {cad_model_path} not found. Falling back to {fallback_cad_model_path}.")
-            cad_model_path = fallback_cad_model_path
+        raise FileNotFoundError(f"CAD model path not found: {cad_model_path}. Check --models.")
+    print(f"CAD model path: {cad_model_path}")
 
     camera_intrinsics_file = Path(root,args.camera)
     # load intrinsics

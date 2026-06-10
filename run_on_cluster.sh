@@ -8,7 +8,7 @@
 #SBATCH --error=slurm-%x-%j.err
 #SBATCH --export=SLURM_OUT=not_called_from_exp
 #SBATCH --export=JOB_NAME=not_called_from_exp
-# Task options 'train' or 'eval'
+# Task options 'train', 'eval', or 'resume'
 #SBATCH --export=TASK=train
 # Model options: tiny, small, medium, large, xlarge
 #SBATCH --export=MODEL=tiny
@@ -80,6 +80,9 @@ if [ $TASK == 'train' ]; then
 elif [ $TASK == 'eval' ]; then
     echo "Eval task selected"
     IDX='1'
+elif [ $TASK == 'resume' ]; then
+    echo "Resume task selected"
+    IDX='3'
 else
     echo "Unknown task $TASK, exiting"
     exit 1
@@ -100,7 +103,7 @@ rootless-docker run --gpus all --shm-size=256g \
     -v $PATH_TO_WEIGHTS:/workspace/LWDETR/data/weights \
     pc3163.igd.fraunhofer.de:4567/$IMAGE_NAME\
     bash -c "python /workspace/LWDETR/models/ops/setup.py build install && \
-                /workspace/LWDETR/scripts/pose/$MODEL/$TASK.sh $NUM_GPUS $COEF_KPT $COEF_TRANS_XY $COEF_TRANS_Z $COEF_ROT $COEF_ADDS $COEF_CLAS $COEF_BBOX $COEF_GIOU $SLURM_JOB_ID $JOB_NAME $ROT_REP $WARM_UP_EPOCHS $MATCHER_TYPE $REDUCE_DET_LOSS_EPOCHS $SET_COST_CLASS $SET_COST_BBOX $SET_COST_GIOU $SET_COST_ROT $SET_COST_TRANS $SET_COST_KPT $MATCHER_SYMMETRY_STRIDE"
+                /workspace/LWDETR/scripts/pose/$MODEL/$TASK.sh $NUM_GPUS $COEF_KPT $COEF_TRANS_XY $COEF_TRANS_Z $COEF_ROT $COEF_ADDS $COEF_CLAS $COEF_BBOX $COEF_GIOU $SLURM_JOB_ID $JOB_NAME $ROT_REP $WARM_UP_EPOCHS $MATCHER_TYPE $REDUCE_DET_LOSS_EPOCHS $SET_COST_CLASS $SET_COST_BBOX $SET_COST_GIOU $SET_COST_ROT $SET_COST_TRANS $SET_COST_KPT $MATCHER_SYMMETRY_STRIDE $CAD_MODELS"
                                     
         
 ## OUTPUT

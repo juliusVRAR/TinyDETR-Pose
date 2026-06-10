@@ -27,14 +27,20 @@ SET_COST_KPT=${21:-${SET_COST_KPT:-5.0}}
 MATCHER_SYMMETRY_STRIDE=${22:-${MATCHER_SYMMETRY_STRIDE:-1}}
 CAD_MODELS=${23:-${CAD_MODELS:-/models/}}
 
+# Set this to the checkpoint you want to resume from.
+RESUME_CKPT=/workspace/LWDETR/output/pose/0_tiny/81376/_train_tiny_6d_z15.0_r1.0_adds0.0_wu0_m6d_rot_trans_mrot0.0_ms30_rd6767_obj365_14:42:40-2026-06-09/checkpoint0029_new.pth
 if [ -z "$RUN_ID" ]; then
   RUN_ID=no_slurm_id
 fi
 
-timestamp() {
-  date +"%T-%Y-%m-%d" # current time 
-}
-OUTPUT_DIR=/workspace/LWDETR/output/pose/0_tiny/$RUN_ID/\_$JOB_NAME\_$(timestamp)           
+if [ ! -f "$RESUME_CKPT" ]; then
+  echo "Resume checkpoint not found: $RESUME_CKPT" >&2
+  exit 1
+fi
+
+# Resume into the same run directory as the checkpoint.
+OUTPUT_DIR=$(dirname "$RESUME_CKPT")
+
 python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
@@ -96,10 +102,8 @@ python -u -m torch.distributed.launch \
                             --bbox_loss_coef $COEF_BBOX \
                             --giou_loss_coef $COEF_GIOU \
                             --output_dir $OUTPUT_DIR \
+                            --resume $RESUME_CKPT \
                             --warm_up_epochs $WARM_UP_EPOCHS \
-                            --quick_eval \
                             --rotation_representation $ROT_REP \
-                            --reduce_det_loss_epochs $REDUCE_DET_LOSS_EPOCHS
-
-                             
-                            
+                            --reduce_det_loss_epochs $REDUCE_DET_LOSS_EPOCHS \
+                            --quick_eval
