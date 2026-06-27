@@ -31,6 +31,7 @@ LR=${25:-${LR:-1e-4}}
 LR_ENCODER=${26:-${LR_ENCODER:-1.5e-4}}
 LR_POSE_HEADS=${27:-${LR_POSE_HEADS:-$LR}}
 LR_DROP=${28:-${LR_DROP:-55}}
+LR_DROP_POSE_HEADS=${29:-${LR_DROP_POSE_HEADS:-$LR_DROP}}
 
 # Set this to the checkpoint you want to resume from.
 RESUME_CKPT=/workspace/LWDETR/output/pose/0_tiny/82172/_train_tiny_6d_z15.0_r1.0_adds2.5_wu1_m6d_rot_trans_mrot0.0_ms30_rd6767_noKPT_15:41:22-2026-06-20/checkpoint0039_new.pth
@@ -60,6 +61,7 @@ python -u -m torch.distributed.launch \
                             --lr_backbone 1e-6 \
                             --weight_decay 1e-4 \
                             --lr_drop $LR_DROP \
+                            --lr_drop_pose_heads $LR_DROP_POSE_HEADS \
                             --lr_vit_layer_decay 0.8 \
                             --lr_component_decay 0.7 \
                             --encoder vit_tiny \

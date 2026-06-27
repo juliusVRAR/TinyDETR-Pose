@@ -31,6 +31,7 @@ LR=${25:-${LR:-1e-4}}
 LR_ENCODER=${26:-${LR_ENCODER:-1.5e-4}}
 LR_POSE_HEADS=${27:-${LR_POSE_HEADS:-$LR}}
 LR_DROP=${28:-${LR_DROP:-55}}
+LR_DROP_POSE_HEADS=${29:-${LR_DROP_POSE_HEADS:-$LR_DROP}}
 
 if [ -z "$RUN_ID" ]; then
   RUN_ID=no_slurm_id
@@ -51,6 +52,7 @@ python -u -m torch.distributed.launch \
                             --lr_backbone 1e-6 \
                             --weight_decay 1e-4 \
                             --lr_drop $LR_DROP \
+                            --lr_drop_pose_heads $LR_DROP_POSE_HEADS \
                             --lr_vit_layer_decay 0.8 \
                             --lr_component_decay 0.7 \
                             --encoder vit_tiny \

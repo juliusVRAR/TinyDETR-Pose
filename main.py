@@ -323,6 +323,8 @@ def get_args_parser():
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=12, type=int)
     parser.add_argument('--lr_drop', default=11, type=int)
+    parser.add_argument('--lr_drop_pose_heads', default=None, type=int,
+                        help='Epoch interval for dropping pose-head learning rate. Defaults to --lr_drop when omitted.')
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
     parser.add_argument('--lr_vit_layer_decay', default=0.8, type=float)
@@ -586,6 +588,8 @@ def main(args):
         args.eval = True
     # if args.lr_pose_heads is None:
     #     args.lr_pose_heads = args.lr
+    # if args.lr_drop_pose_heads is None:
+    #     args.lr_drop_pose_heads = args.lr_drop
 
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
@@ -659,7 +663,14 @@ def main(args):
     #     {'params': new_head_params, 'lr': args.lr} 
     #     ], weight_decay=args.weight_decay)
     
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        [
+            (lambda scheduler_epoch, drop_epoch=(args.lr_drop_pose_heads if group.get('lr_group') == 'pose_heads' else args.lr_drop):
+                0.1 ** (scheduler_epoch // drop_epoch) if drop_epoch > 0 else 1.0)
+            for group in optimizer.param_groups
+        ],
+    )
     
     # Build the dataset for training and validation
     dataset_train = build_dataset(image_set=args.train_set, args=args)
@@ -751,7 +762,16 @@ def main(args):
                 print('Warning: checkpoint missing optimizer state; resuming weights only.')
 
             if 'lr_scheduler' in resume_checkpoint:
-                lr_scheduler.load_state_dict(resume_checkpoint['lr_scheduler'])
+                try:
+                    lr_scheduler.load_state_dict(resume_checkpoint['lr_scheduler'])
+                except (KeyError, TypeError, ValueError):
+                    if resume_epoch is not None:
+                        lr_scheduler.last_epoch = resume_epoch
+                        if hasattr(lr_scheduler, '_step_count'):
+                            lr_scheduler._step_count = resume_epoch + 1
+                        if hasattr(lr_scheduler, '_last_lr'):
+                            lr_scheduler._last_lr = [group['lr'] for group in optimizer.param_groups]
+                    print('Warning: checkpoint lr_scheduler state is incompatible; reconstructed scheduler epoch from checkpoint.')
             elif resume_epoch is not None:
                 lr_scheduler.last_epoch = resume_epoch
                 if hasattr(lr_scheduler, '_step_count'):
@@ -1082,7 +1102,12 @@ def main(args):
 
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.checkpoint_interval == 0:
+            lr_drop_checkpoint = any(
+                (epoch + 1) % drop_epoch == 0
+                for drop_epoch in {args.lr_drop, args.lr_drop_pose_heads}
+                if drop_epoch > 0
+            )
+            if lr_drop_checkpoint or (epoch + 1) % args.checkpoint_interval == 0:
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}_new.pth')
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master(

@@ -64,7 +64,7 @@ def get_param_dict(args, model_without_ddp: nn.Module):
     pose_head_param_ids = {id(p) for p in pose_head_params}
 
     pose_head_param_dicts = [
-        {"params": param, "lr": pose_head_lr}
+        {"params": param, "lr": pose_head_lr, "lr_group": "pose_heads"}
         for param in pose_head_params
     ]
 

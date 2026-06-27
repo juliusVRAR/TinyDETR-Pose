@@ -18,8 +18,10 @@ slurm_out="$HOME/lw-detr6d/slurm_${task}_${model}"
 batch_size_per_gpu=4
 lr=1e-4
 lr_encoder=1.5e-4
-lr_pose_heads=$lr
 lr_drop=55
+# Pose head larning rate and drop can be set separately.
+lr_pose_heads=$lr
+lr_drop_pose_heads=$lr_drop
 # Detection Loss config (standard values from LWDETR paper)
 coef_clas=1.0
 coef_bbox=5.0
@@ -57,7 +59,7 @@ sbatch --job-name=$job_name \
         --mem=$ram \
         --output=$slurm_out/%j-%x.out \
         --error=$slurm_out/%j-%x.err \
-        --export=BATCH_SIZE=$batch_size_per_gpu,LR=$lr,LR_ENCODER=$lr_encoder,LR_POSE_HEADS=$lr_pose_heads,LR_DROP=$lr_drop,COEF_ROT=$coef_rot,COEF_KPT=$coef_kpt,COEF_TRANS_XY=$coef_trans_xy,COEF_TRANS_Z=$coef_trans_z,COEF_ADDS=$coef_adds,COEF_CLAS=$coef_clas,COEF_BBOX=$coef_bbox,COEF_GIOU=$coef_giou,ROT_REP=$rot_rep,WARM_UP_EPOCHS=$warm_up_epochs,CAD_MODELS=$cad_models,MATCHER_TYPE=$matcher_type,REDUCE_DET_LOSS_EPOCHS=$reduce_det_loss_epochs,SET_COST_CLASS=$set_cost_class,SET_COST_BBOX=$set_cost_bbox,SET_COST_GIOU=$set_cost_giou,SET_COST_ROT=$set_cost_rot,SET_COST_TRANS=$set_cost_trans,SET_COST_KPT=$set_cost_kpt,MATCHER_SYMMETRY_STRIDE=$matcher_symmetry_stride,MODEL=$model,TASK=$task,SLURM_OUT=$slurm_out,JOB_NAME=$job_name \
+        --export=BATCH_SIZE=$batch_size_per_gpu,LR=$lr,LR_ENCODER=$lr_encoder,LR_POSE_HEADS=$lr_pose_heads,LR_DROP=$lr_drop,LR_DROP_POSE_HEADS=$lr_drop_pose_heads,COEF_ROT=$coef_rot,COEF_KPT=$coef_kpt,COEF_TRANS_XY=$coef_trans_xy,COEF_TRANS_Z=$coef_trans_z,COEF_ADDS=$coef_adds,COEF_CLAS=$coef_clas,COEF_BBOX=$coef_bbox,COEF_GIOU=$coef_giou,ROT_REP=$rot_rep,WARM_UP_EPOCHS=$warm_up_epochs,CAD_MODELS=$cad_models,MATCHER_TYPE=$matcher_type,REDUCE_DET_LOSS_EPOCHS=$reduce_det_loss_epochs,SET_COST_CLASS=$set_cost_class,SET_COST_BBOX=$set_cost_bbox,SET_COST_GIOU=$set_cost_giou,SET_COST_ROT=$set_cost_rot,SET_COST_TRANS=$set_cost_trans,SET_COST_KPT=$set_cost_kpt,MATCHER_SYMMETRY_STRIDE=$matcher_symmetry_stride,MODEL=$model,TASK=$task,SLURM_OUT=$slurm_out,JOB_NAME=$job_name \
         --mail-user=$mail \
         --mail-type=BEGIN,END,FAIL,PREEMPT,REQUEUE,ALL \
         --qos=$qos \
