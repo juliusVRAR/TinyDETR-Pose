@@ -26,6 +26,11 @@ SET_COST_TRANS=${20:-${SET_COST_TRANS:-5.0}}
 SET_COST_KPT=${21:-${SET_COST_KPT:-5.0}}
 MATCHER_SYMMETRY_STRIDE=${22:-${MATCHER_SYMMETRY_STRIDE:-1}}
 CAD_MODELS=${23:-${CAD_MODELS:-/models/}}
+BATCH_SIZE=${24:-${BATCH_SIZE:-4}}
+LR=${25:-${LR:-1e-4}}
+LR_ENCODER=${26:-${LR_ENCODER:-1.5e-4}}
+LR_POSE_HEADS=${27:-${LR_POSE_HEADS:-$LR}}
+LR_DROP=${28:-${LR_DROP:-55}}
 
 if [ -z "$RUN_ID" ]; then
   RUN_ID=no_slurm_id
@@ -39,12 +44,13 @@ python -u -m torch.distributed.launch \
                 --nproc_per_node=$NUM_GPU \
                 --use_env \
                 /workspace/LWDETR/main.py \
-                            --lr 1e-4 \
+                            --lr $LR \
+                            --lr_pose_heads $LR_POSE_HEADS \
                             --lr_transformer 2e-5 \
-                            --lr_encoder 1.5e-4 \
+                            --lr_encoder $LR_ENCODER \
                             --lr_backbone 1e-6 \
                             --weight_decay 1e-4 \
-                            --lr_drop 55 \
+                            --lr_drop $LR_DROP \
                             --lr_vit_layer_decay 0.8 \
                             --lr_component_decay 0.7 \
                             --encoder vit_tiny \
@@ -85,7 +91,7 @@ python -u -m torch.distributed.launch \
                             --set_cost_translation $SET_COST_TRANS \
                             --set_cost_keypoint $SET_COST_KPT \
                             --matcher_symmetry_stride $MATCHER_SYMMETRY_STRIDE \
-                            --batch_size 16 \
+                            --batch_size $BATCH_SIZE \
                             --n_mesh_points 512 \
                             --keypoint_loss_coef $COEF_KPT \
                             --trans_z_loss_coef $COEF_TRANS_Z \

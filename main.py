@@ -440,8 +440,8 @@ def get_args_parser():
     parser.add_argument('--trans_z_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation z component')
     parser.add_argument('--trans_xy_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the translation')
     parser.add_argument('--rot_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the rotation')
-    parser.add_argument('--adds_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the ADD-S metric. Active after warmup epochs.')
-    parser.add_argument('--warm_up_epochs', default=0, type=int, help='Number of epochs before ADD-S loss multiplier is activated.')
+    parser.add_argument('--adds_loss_coef', default=1.0, type=float, help='Loss weighing parameter for the ADD-S metric.')
+    parser.add_argument('--warm_up_epochs', default=0, type=int, help='Number of epochs to train ADD-S at 10% weight before using the full ADD-S coefficient.')
     # Loss
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
@@ -584,6 +584,8 @@ def should_run_pose_eval(epoch: int, total_epochs: int, warmup_epochs: int) -> b
 def main(args):
     if args.eval_only:
         args.eval = True
+    # if args.lr_pose_heads is None:
+    #     args.lr_pose_heads = args.lr
 
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
