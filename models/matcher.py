@@ -19,6 +19,7 @@ Modules to compute the matching cost and solve the corresponding LSAP.
 import numpy as np
 from sympy import rotations
 import torch
+import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
@@ -343,6 +344,15 @@ class Matcher6DRotTrans(nn.Module):
                 device=out_trans.device, dtype=out_trans.dtype
             )
             cost_translation = torch.cdist(out_trans, tgt_trans, p=2)
+            # Consider smooth l1 distacne ? 
+            # out_trans: (B, M, D), tgt_trans: (B, N, D)
+            # diff = out_trans.unsqueeze(2) - tgt_trans.unsqueeze(1)  # (B, M, N, D)
+            # cost_translation = F.smooth_l1_loss(
+            #     diff, 
+            #     torch.zeros_like(diff), 
+            #     reduction='none', 
+            #     beta=1.0
+            # ).sum(dim=-1)  # (B, M, N)
         else:
             cost_translation = 0.0
         if self.cost_rotation != 0:
