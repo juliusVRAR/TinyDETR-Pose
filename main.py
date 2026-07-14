@@ -309,6 +309,25 @@ def build_training_checkpoint(args, model_state: dict, optimizer, lr_scheduler, 
         checkpoint.update(extra_payload)
     return checkpoint
 
+
+def make_lr_drop_lambda(base_lr: float, lr_after_drop: float, drop_epoch: int | None):
+    if drop_epoch is None or drop_epoch <= 0 or base_lr <= 0:
+        return lambda scheduler_epoch: 1.0
+
+    drop_factor = lr_after_drop / base_lr
+    return lambda scheduler_epoch: 1.0 if scheduler_epoch < drop_epoch else drop_factor
+
+
+def set_scheduler_epoch_lrs(lr_scheduler, scheduler_epoch: int) -> None:
+    lr_scheduler.last_epoch = scheduler_epoch
+    lrs = [
+        base_lr * lr_lambda(scheduler_epoch)
+        for base_lr, lr_lambda in zip(lr_scheduler.base_lrs, lr_scheduler.lr_lambdas)
+    ]
+    for param_group, lr in zip(lr_scheduler.optimizer.param_groups, lrs):
+        param_group['lr'] = lr
+    lr_scheduler._last_lr = lrs
+
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     # Learnining hyperparameters
@@ -323,6 +342,8 @@ def get_args_parser():
     parser.add_argument('--weight_decay', default=1e-4, type=float)
     parser.add_argument('--epochs', default=12, type=int)
     parser.add_argument('--lr_drop', default=11, type=int)
+    parser.add_argument('--lr_after_drop', default=5e-5, type=float,
+                        help='Base learning rate to use once --lr_drop has been reached.')
     parser.add_argument('--lr_drop_pose_heads', default=None, type=int,
                         help='Epoch interval for dropping pose-head learning rate. Defaults to --lr_drop when omitted.')
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
@@ -481,7 +502,7 @@ def get_args_parser():
     # output and logging
     parser.add_argument('--output_dir', default='output',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--checkpoint_interval', default=10, type=int,
+    parser.add_argument('--checkpoint_interval', default=5, type=int,
                         help='epoch interval to save checkpoint')
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--resume', default=None, type=str, 
@@ -510,7 +531,7 @@ def get_args_parser():
     parser.add_argument('--fp16_eval', default=False, action='store_true',
                         help='evaluate in fp16 precision.')
     # * Evaluator
-    parser.add_argument('--eval_interval', type=int, default=10,
+    parser.add_argument('--eval_interval', type=int, default=3,
                         help="Epoch interval after which the current model is evaluated")
     parser.add_argument('--class_info', type=str, default='/annotations/classes.json',
                         help='path to .txt-file containing the class names')
@@ -580,8 +601,8 @@ def should_run_pose_eval(epoch: int, total_epochs: int, warmup_epochs: int) -> b
         # 80–95%: every 5 epochs
         return (e % 5) == 0
     else:
-        # After warmup, before 80%: every 10 epochs
-        return (e - warmup_epochs) % 10 == 0
+        # After warmup, before 80%: every eval_interval epochs
+        return (e - warmup_epochs) % args.eval_interval == 0
 
 def main(args):
     if args.eval_only:
@@ -630,6 +651,7 @@ def main(args):
     param_dicts = get_param_dict(args, model_without_ddp)
 
     # TODO: Check if the other one is needed
+    print(f"LR1: {args.lr}")
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, 
                                   weight_decay=args.weight_decay)
     
@@ -663,11 +685,15 @@ def main(args):
     #     {'params': new_head_params, 'lr': args.lr} 
     #     ], weight_decay=args.weight_decay)
     
+    pose_lr_drop = args.lr_drop if args.lr_drop_pose_heads is None else args.lr_drop_pose_heads
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         [
-            (lambda scheduler_epoch, drop_epoch=(args.lr_drop_pose_heads if group.get('lr_group') == 'pose_heads' else args.lr_drop):
-                0.1 ** (scheduler_epoch // drop_epoch) if drop_epoch > 0 else 1.0)
+            make_lr_drop_lambda(
+                args.lr,
+                args.lr_after_drop,
+                pose_lr_drop if group.get('lr_group') == 'pose_heads' else args.lr_drop,
+            )
             for group in optimizer.param_groups
         ],
     )
@@ -782,6 +808,7 @@ def main(args):
 
             if resume_epoch is not None:
                 args.start_epoch = resume_epoch + 1
+                set_scheduler_epoch_lrs(lr_scheduler, args.start_epoch)
 
             restore_best_metric_holder(best_map_holder, resume_checkpoint.get('best_map_holder', {}))
             best_adds_score = float(resume_checkpoint.get('best_adds_score', resume_checkpoint.get('score', 0.0)))
@@ -1104,7 +1131,7 @@ def main(args):
             checkpoint_paths = [output_dir / 'checkpoint.pth']
             lr_drop_checkpoint = any(
                 (epoch + 1) % drop_epoch == 0
-                for drop_epoch in {args.lr_drop, args.lr_drop_pose_heads}
+                for drop_epoch in {args.lr_drop, pose_lr_drop}
                 if drop_epoch > 0
             )
             if lr_drop_checkpoint or (epoch + 1) % args.checkpoint_interval == 0:

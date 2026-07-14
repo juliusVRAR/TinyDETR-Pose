@@ -1571,13 +1571,13 @@ class SetCriterion(nn.Module):
             
             # Symmtery aware L1 loss on 6D rotation representation with min distance for symmetric objects.
             # loss_rot_dict = self.loss_L1_rot_sym_aware_min_distance_z(outputs, targets, indices, num_boxes)
-            # Geodensic Loss
+            # Geodensic Loss & SARR Cosine Similarity Loss
             #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
-            loss_rot_dict = self.loss_rotation_symmetry_transform_min(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rotation_symmetry_transform_min(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
             # 6D representation with L1 loss (YOLOX6D Approach)
-            #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
             #loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint_oks(outputs, targets, indices, num_boxes)
             # L1 loss for translation xy in meters.

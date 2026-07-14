@@ -35,6 +35,42 @@ def format_metric_value(value):
         return 'N/A'
     return f'{float(value)}'
 
+def get_adds_weight(
+    epoch,
+    target_weight,
+    start_epoch=3,
+    ramp_epochs=8,
+    min_frac=0.0,
+    schedule="cosine",
+):
+    """
+    epoch: 0-based epoch index
+    target_weight: args.adds_loss_coef
+    start_epoch: epochs before this use zero ADD-S
+    ramp_epochs: number of epochs used to reach target_weight
+    min_frac: starting fraction after start_epoch
+    """
+
+    if epoch < start_epoch:
+        return 0.0
+
+    if ramp_epochs <= 0:
+        return target_weight
+
+    p = (epoch - start_epoch + 1) / float(ramp_epochs)
+    p = max(0.0, min(1.0, p))
+
+    if schedule == "linear":
+        scale = p
+    elif schedule == "cosine":
+        scale = 0.5 * (1.0 - math.cos(math.pi * p))
+    else:
+        raise ValueError(f"Unknown schedule: {schedule}")
+
+    scale = min_frac + (1.0 - min_frac) * scale
+
+    return target_weight * scale
+
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float=0,
@@ -171,12 +207,23 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             torchvision.utils.save_image(grid, filename, nrow=nrow, padding=2, normalize=normalize)
             # print(f"Grid saved as {filename}")
         outputs = model(samples, targets)
-
-        if epoch < args.warm_up_epochs:
-            # Warm up ADD-S only; rotation loss stays at args.rot_loss_coef.
-            set_loss_weight('loss_adds', args.adds_loss_coef * 0.1)
-        else:
-            set_loss_weight('loss_adds', args.adds_loss_coef)
+        rampUp=True
+        if args.adds_loss_coef > 0 and rampUp:
+            # Set to finetuning of ADD-S loss after warmup and ramp-up epochs. This is a cosine schedule from 0 to args.adds_loss_coef.
+            adds_weight = get_adds_weight(
+                            epoch=epoch,
+                            target_weight=args.adds_loss_coef,
+                            start_epoch=30, # Set to 0 if you wantg to warm up ADD-S loss from the start of training
+                            ramp_epochs=8, # Set to warm up epochs for ADD-S loss
+                            min_frac=0.0, # set to 0.1 for 10% of target weight at start of ramp
+                            schedule="cosine",
+                        )           
+            set_loss_weight('loss_adds', adds_weight)
+        # if epoch < args.warm_up_epochs:
+        #     # Warm up ADD-S only; rotation loss stays at args.rot_loss_coef.
+        #     set_loss_weight('loss_adds', args.adds_loss_coef * 0.1)
+        # else:
+        #     set_loss_weight('loss_adds', args.adds_loss_coef)
         # TODO: Reduce detection loss coeffs in later training stages.
         # Currently set to a very high epoch number to disable this.
         if epoch >= args.reduce_det_loss_epochs:
