@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Run LW-DETR 6D inference on a dataset split and render 2D bboxes + 3D pose overlays.
+Run LW-DETR 6D inference on a dataset split and render predicted and ground-truth
+6D poses together with predicted 2D bounding boxes.
 """
 from pathlib import Path
 import argparse
@@ -14,6 +15,11 @@ from util import box_ops
 import util.misc as utils
 from util.utils import clean_state_dict
 from util.visualize_object_pose import YCBVVisualizer
+
+
+PRED_POSE_COLOR = (255, 0, 255)  # magenta in OpenCV BGR order
+GT_POSE_COLOR = (0, 255, 0)      # green in OpenCV BGR order
+PRED_BOX_COLOR = (255, 255, 0)   # cyan in OpenCV BGR order
 
 
 def build_vis_parser():
@@ -87,12 +93,26 @@ def draw_2d_bboxes(img_bgr, detections, class_map):
     img = img_bgr.copy()
     for det in detections:
         x1, y1, x2, y2 = det["box"]
-        color = (0, 255, 0)
+        color = PRED_BOX_COLOR
         cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
         label_text = class_map.get(det["label"], str(det["label"])) if class_map else str(det["label"])
-        cv2.putText(img, f"{label_text} {det['score']:.2f}", (int(x1), max(0, int(y1) - 4)),
+        cv2.putText(img, f"2D {label_text} {det['score']:.2f}", (int(x1), max(0, int(y1) - 4)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
     return img
+
+
+def draw_pose_legend(img_bgr):
+    """Add a compact legend for the two projected 6D-pose sources."""
+    entries = (("Ground truth 6D", GT_POSE_COLOR), ("Predicted 6D", PRED_POSE_COLOR))
+    overlay = img_bgr.copy()
+    cv2.rectangle(overlay, (8, 8), (190, 58), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.65, img_bgr, 0.35, 0, img_bgr)
+    for index, (text, color) in enumerate(entries):
+        y = 26 + index * 22
+        cv2.line(img_bgr, (16, y - 4), (38, y - 4), color, 3, cv2.LINE_AA)
+        cv2.putText(img_bgr, text, (46, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45, color, 1, cv2.LINE_AA)
+    return img_bgr
 
 
 def main():
@@ -147,6 +167,24 @@ def main():
 
                 img_bgr = draw_2d_bboxes(img_bgr, dets, class_map)
 
+                # Draw GT first with a wider line. Predictions are then overlaid
+                # with a narrower line, leaving a green outline when they agree.
+                gt_ann = {
+                    "labels": tgt["labels"],
+                    "relative_position": tgt["relative_position"],
+                    "relative_rotation": tgt["relative_rotation"],
+                }
+                img_bgr = visualizer.visualize_single_image(
+                    img_bgr,
+                    gt_ann,
+                    K=k_mat.cpu().numpy(),
+                    show_mesh=args.show_mesh,
+                    sample_points=args.mesh_points,
+                    conf_threshold=0.0,
+                    color=GT_POSE_COLOR,
+                    line_thickness=4,
+                    label_prefix="GT")
+
                 if dets:
                     ann = {
                         "labels": torch.tensor([d["label"] for d in dets]),
@@ -160,7 +198,12 @@ def main():
                         show_mesh=args.show_mesh,
                         sample_points=args.mesh_points,
                         conf_threshold=args.score_threshold,
-                        scores=[d["score"] for d in dets])
+                        scores=[d["score"] for d in dets],
+                        color=PRED_POSE_COLOR,
+                        line_thickness=2,
+                        label_prefix="Pred")
+
+                img_bgr = draw_pose_legend(img_bgr)
 
                 out_file = output_dir / f"{args.split}_{int(tgt['image_id'])}.png"
                 cv2.imwrite(str(out_file), img_bgr)

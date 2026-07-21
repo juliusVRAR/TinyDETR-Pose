@@ -558,19 +558,29 @@ class YCBVVisualizer:
                                show_mesh=False, 
                                sample_points=1000,
                                conf_threshold: Optional[float] = None,
-                               scores: Optional[np.ndarray] = None) -> np.ndarray:
+                               scores: Optional[np.ndarray] = None,
+                               color: Optional[Tuple[int, int, int]] = None,
+                               line_thickness: int = 2,
+                               label_prefix: str = "") -> np.ndarray:
         """
         Visualize a single image with 3D models and bounding boxes
         
         Args:
             img: Input image (numpy array, RGB or BGR, or torch tensor)
-            annotations: List of dictionaries with keys:
-                        - 'obj_id': object ID
-                        - 'cam_R_m2c': 3x3 rotation matrix (list, array, or tensor)
-                        - 'cam_t_m2c': 3x1 translation vector (list, array, or tensor)
+            annotations: Dictionary containing ``labels`` (N,),
+                ``relative_rotation`` (N,3,3), and ``relative_position`` (N,3).
+                Optional per-object ``intrinsics`` may be (N,4), (N,9), or
+                (N,3,3).
             K: 3x3 camera intrinsic matrix (list, array, or tensor)
             show_mesh: If True, overlay CAD model vertices on the image
             sample_points: Number of mesh points to sample per object (if show_mesh=True)
+            conf_threshold: Minimum score to draw. All annotations are drawn if omitted.
+            scores: Optional confidence score for each annotation.
+            color: Optional BGR color shared by all annotations. By default, each
+                object class receives a deterministic color.
+            line_thickness: Thickness of the projected 3D bounding boxes.
+            label_prefix: Optional prefix used to identify the annotation source,
+                for example ``"GT"`` or ``"Pred"``.
         
         Returns:
             Visualized image with 3D bounding boxes and optionally CAD models
@@ -586,147 +596,87 @@ class YCBVVisualizer:
         elif img.shape[2] == 4:
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
         vis_img = img.copy()
-        labels = annotations['labels']
-        rel_pos = annotations['relative_position']
-        rel_rot = annotations['relative_rotation']
-        # optional per-object intrinsics
-        intrinsics_rows = annotations.get('intrinsics', None)
-        
-         # normalize tensor types
-        if hasattr(labels, "cpu"):
-            labels_np = labels.cpu().numpy()
-        else:
-            labels_np = np.asarray(labels)
-        if hasattr(rel_pos, "cpu"):
-            rel_pos_np = rel_pos.cpu().numpy()
-        else:
-            rel_pos_np = np.asarray(rel_pos)
-        if hasattr(rel_rot, "cpu"):
-            rel_rot_np = rel_rot.cpu().numpy()
-        else:
-            rel_rot_np = np.asarray(rel_rot)
+        def to_numpy(value):
+            if hasattr(value, "detach"):
+                value = value.detach()
+            if hasattr(value, "cpu"):
+                value = value.cpu()
+            return np.asarray(value)
 
-        N = rel_pos_np.shape[0]
+        labels_np = to_numpy(annotations['labels']).astype(int)
+        rel_pos_np = to_numpy(annotations['relative_position']).astype(np.float32)
+        rel_rot_np = to_numpy(annotations['relative_rotation']).astype(np.float32)
+        num_annotations = rel_pos_np.shape[0]
+        threshold = -np.inf if conf_threshold is None else float(conf_threshold)
+        annotation_scores = (
+            np.ones(num_annotations, dtype=np.float32)
+            if scores is None else to_numpy(scores).astype(np.float32)
+        )
 
-        # Build per-object K list
-        if intrinsics_rows is not None:
-            if hasattr(intrinsics_rows, "cpu"):
-                intrinsics_rows = intrinsics_rows.cpu().numpy()
-            assert intrinsics_rows.shape[0] == N and intrinsics_rows.shape[1] == 4, "intrinsics must be (N,4)"
-            Ks_list = []
-            for i in range(N):
-                fx, fy, cx, cy = intrinsics_rows[i]
-                K_i = np.array([[fx, 0,  cx],
-                                [0,  fy, cy],
-                                [0,  0,   1]], dtype=np.float32)
-                Ks_list.append(K_i)
-            
-            for label, rot, trans, K, score in zip(annotations["labels"], annotations["relative_rotation"], annotations["relative_position"], Ks_list, scores if scores is not None else [1.0]*N):
-                if score > conf_threshold:
-                    obj_id = label
-                    R = np.array(rot).reshape(3, 3)
-                    trans = trans*1000.0 # In the dataset the translation is in meters, convert to mm.
-                    t = np.array(trans).flatten()
-                    
-                    try:
-                        mesh = self.load_model(obj_id)
-                    except FileNotFoundError:
-                        print(f"Warning: Model for obj_id {obj_id} not found, skipping...")
-                        continue
-                    
-                    # Generate random color for this object
-                    np.random.seed(obj_id)  # Consistent color per object
-                    color = tuple(np.random.randint(100, 255, 3).tolist())
-                    
-                    # Get 3D bounding box
-                    bbox_3d = self.get_3d_bbox(mesh)
-                    
-                    # Transform bbox to camera coordinates and project to 2D
-                    bbox_2d = self.project_points(bbox_3d, K, R, t)
-                    
-                    # Draw bounding box
-                    vis_img = self.draw_3d_bbox(vis_img, bbox_2d, color, 2)
-                    
-                    # Overlay CAD model if requested
-                    if show_mesh:
-                        vertices = mesh.vertices.copy()
-                        
-                        # Sample vertices for visualization
-                        if len(vertices) > sample_points:
-                            indices = np.random.choice(len(vertices), sample_points, replace=False)
-                            vertices = vertices[indices]
-                        
-                        # Project vertices
-                        vertices_2d = self.project_points(vertices, K, R, t)
-                        
-                        # Draw mesh points
-                        for pt in vertices_2d:
-                            if 0 <= pt[0] < img.shape[1] and 0 <= pt[1] < img.shape[0]:
-                                cv2.circle(vis_img, tuple(pt.astype(int)), 1, color, -1)
-                    
-                    # Add label
-                    center_2d = bbox_2d.mean(axis=0).astype(int)
-                    cv2.putText(vis_img, f'obj_{obj_id}_{score:.2f}', tuple(center_2d), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
-                
-            return vis_img
-
-            
+        intrinsics_rows = annotations.get('intrinsics')
+        if intrinsics_rows is None:
+            K_np = to_numpy(K).reshape(3, 3)
+            Ks_list = [K_np] * num_annotations
         else:
-            # Ensure K is numpy array (handle tensor)
-            if hasattr(K, 'cpu'):
-                K = K.cpu().numpy()
-            K = np.array(K).reshape(3, 3)
-            
-            for label, rot, trans, score in zip(annotations["labels"], annotations["relative_rotation"], annotations["relative_position"], scores if scores is not None else [1.0]*N):
-                if score > conf_threshold:
-                    obj_id = label
-                    R = np.array(rot).reshape(3, 3)
-                    trans = trans*1000.0 # In the dataset the translation is in meters, convert to mm.
-                    t = np.array(trans).flatten()
-                    
-                    try:
-                        mesh = self.load_model(obj_id)
-                    except FileNotFoundError:
-                        print(f"Warning: Model for obj_id {obj_id} not found, skipping...")
-                        continue
-                    
-                    # Generate random color for this object
-                    np.random.seed(obj_id)  # Consistent color per object
-                    color = tuple(np.random.randint(100, 255, 3).tolist())
-                    
-                    # Get 3D bounding box
-                    bbox_3d = self.get_3d_bbox(mesh)
-                    
-                    # Transform bbox to camera coordinates and project to 2D
-                    bbox_2d = self.project_points(bbox_3d, K, R, t)
-                    
-                    # Draw bounding box
-                    vis_img = self.draw_3d_bbox(vis_img, bbox_2d, color, 2)
-                    
-                    # Overlay CAD model if requested
-                    if show_mesh:
-                        vertices = mesh.vertices.copy()
-                        
-                        # Sample vertices for visualization
-                        if len(vertices) > sample_points:
-                            indices = np.random.choice(len(vertices), sample_points, replace=False)
-                            vertices = vertices[indices]
-                        
-                        # Project vertices
-                        vertices_2d = self.project_points(vertices, K, R, t)
-                        
-                        # Draw mesh points
-                        for pt in vertices_2d:
-                            if 0 <= pt[0] < img.shape[1] and 0 <= pt[1] < img.shape[0]:
-                                cv2.circle(vis_img, tuple(pt.astype(int)), 1, color, -1)
-                    
-                    # Add label
-                    center_2d = bbox_2d.mean(axis=0).astype(int)
-                    cv2.putText(vis_img, f'obj_{obj_id}_{score:.2f}', tuple(center_2d), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 2)
-            
-            return vis_img
+            intrinsics_np = to_numpy(intrinsics_rows)
+            if intrinsics_np.shape == (num_annotations, 4):
+                Ks_list = [
+                    np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+                    for fx, fy, cx, cy in intrinsics_np
+                ]
+            elif intrinsics_np.shape in ((num_annotations, 9), (num_annotations, 3, 3)):
+                Ks_list = list(intrinsics_np.reshape(-1, 3, 3))
+            else:
+                raise ValueError(
+                    "intrinsics must have shape (N,4), (N,9), or (N,3,3); "
+                    f"got {intrinsics_np.shape}"
+                )
+
+        for label, rot, trans, K_i, score in zip(
+                labels_np, rel_rot_np, rel_pos_np, Ks_list, annotation_scores):
+            score = float(score)
+            if score < threshold:
+                continue
+
+            obj_id = int(label)
+            t = trans.flatten() * 1000.0  # Dataset translations are in metres; CAD models use mm.
+            try:
+                mesh = self.load_model(obj_id)
+            except FileNotFoundError:
+                print(f"Warning: Model for obj_id {obj_id} not found, skipping...")
+                continue
+
+            # Generate a consistent class color unless the caller wants to
+            # distinguish annotation sources (for example GT vs prediction).
+            rng = np.random.RandomState(obj_id)
+            draw_color = color
+            if draw_color is None:
+                draw_color = tuple(rng.randint(100, 255, 3).tolist())
+
+            bbox_3d = self.get_3d_bbox(mesh)
+            bbox_2d = self.project_points(bbox_3d, K_i, rot, t)
+            self.draw_3d_bbox(vis_img, bbox_2d, draw_color, line_thickness)
+
+            if show_mesh:
+                vertices = mesh.vertices.copy()
+                if len(vertices) > sample_points:
+                    indices = rng.choice(len(vertices), sample_points, replace=False)
+                    vertices = vertices[indices]
+                vertices_2d = self.project_points(vertices, K_i, rot, t)
+                for pt in vertices_2d:
+                    if 0 <= pt[0] < img.shape[1] and 0 <= pt[1] < img.shape[0]:
+                        cv2.circle(vis_img, tuple(pt.astype(int)), 1, draw_color, -1)
+
+            center_2d = bbox_2d.mean(axis=0).astype(int)
+            label_text = f'obj_{obj_id}'
+            if scores is not None:
+                label_text += f' {score:.2f}'
+            if label_prefix:
+                label_text = f'{label_prefix} {label_text}'
+            cv2.putText(vis_img, label_text, tuple(center_2d),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, draw_color, 2, cv2.LINE_AA)
+
+        return vis_img
 
 
 def save_image_with_bboxes(img: torch.Tensor,

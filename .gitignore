@@ -29,3 +29,4 @@ output/*
 *.jpeg
 *.png
 slurm_*
+logs/
