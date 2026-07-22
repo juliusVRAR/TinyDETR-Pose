@@ -149,6 +149,7 @@ def get_loss_configuration(args, criterion) -> dict:
         'training_behavior': {
             'warm_up_epochs': args.warm_up_epochs,
             'reduce_det_loss_epochs': args.reduce_det_loss_epochs,
+            'augmentation_start_epoch': args.augmentation_start_epoch,
         },
     }
 
@@ -328,6 +329,13 @@ def set_scheduler_epoch_lrs(lr_scheduler, scheduler_epoch: int) -> None:
         param_group['lr'] = lr
     lr_scheduler._last_lr = lrs
 
+
+def set_dataset_augmentation_for_epoch(dataset, epoch: int, start_epoch: int) -> bool:
+    enabled = epoch >= start_epoch
+    if hasattr(dataset, 'set_augmentation_enabled'):
+        return dataset.set_augmentation_enabled(enabled)
+    return False
+
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     # Learnining hyperparameters
@@ -499,6 +507,9 @@ def get_args_parser():
     # Data augmentations TODO: add yolox6d 
     parser.add_argument('--mosaic_augmentation', action='store_true',
                         help='Whether to use mosaic augmentation (from yolox6d).')
+    parser.add_argument('--augmentation_start_epoch', default=0, type=int,
+                        help='Epoch from which requested training augmentations are enabled. '
+                             'Use 30 to train the first 30 epochs without augmentation. Default: 0.')
     # output and logging
     parser.add_argument('--output_dir', default='output',
                         help='path where to save, empty for no saving')
@@ -605,6 +616,9 @@ def should_run_pose_eval(epoch: int, total_epochs: int, warmup_epochs: int) -> b
         return (e - warmup_epochs) % args.eval_interval == 0
 
 def main(args):
+    if args.augmentation_start_epoch < 0:
+        raise ValueError('--augmentation_start_epoch must be >= 0')
+
     if args.eval_only:
         args.eval = True
     # if args.lr_pose_heads is None:
@@ -900,6 +914,14 @@ def main(args):
         print("Skipping COCO eval during training (--skip_coco_eval).")
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start_time = time.time()
+        augmentation_changed = set_dataset_augmentation_for_epoch(
+            dataset_train,
+            epoch,
+            args.augmentation_start_epoch,
+        )
+        if augmentation_changed and utils.is_main_process():
+            state = 'enabled' if epoch >= args.augmentation_start_epoch else 'disabled'
+            print(f"Training augmentations {state} at epoch {epoch}.")
         if args.distributed:
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(

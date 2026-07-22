@@ -58,6 +58,12 @@ from pycocotools.coco import COCO
 DEBUG = False
 DEBUG_OUT=Path("debug")
 
+TRAIN_IMAGE_SETS = {'train', 'train_real', 'train_synt', 'train_pbr'}
+
+
+def is_train_image_set(image_set):
+    return image_set in TRAIN_IMAGE_SETS
+
 def load_json(path: str | Path):
     path = Path(path)
     with path.open("r", encoding="utf-8") as f:
@@ -123,7 +129,10 @@ class PoseDataset(CocoDetection):
                  class_info=None,
                  sample_mesh_points = False, # Only true if we calulate symmetries because we have CAD model information
                  n_mesh_points=128, # The higher the more VRAM we need but the better the symmetry-aware loss works (T6D samples 1500 points)
-                 mesh_point_seed=42
+                 mesh_point_seed=42,
+                 use_rgb_augmentation=False,
+                 use_grayscale=False,
+                 augmentation_enabled=True
                  ):
         """
         Args:
@@ -144,6 +153,7 @@ class PoseDataset(CocoDetection):
                                             local_rank=local_rank, 
                                             )
         self._transforms = transforms
+        self._custom_transforms = transforms
         self.prepare = ProcessPoseData(return_masks, camera)
         self.jitter = jitter
         self.jitter_probability = jitter_probability
@@ -153,6 +163,10 @@ class PoseDataset(CocoDetection):
         self.camera = camera
         self.use_mosaic = use_mosaic
         self.cad_model_path = cad_models_path
+        self.requested_rgb_augmentation = use_rgb_augmentation
+        self.requested_grayscale = use_grayscale
+        self.augmentation_enabled = None
+        self.set_augmentation_enabled(augmentation_enabled)
         self.models_info = load_json(Path(cad_models_path, "models_info.json"))
         self.coco = COCO(ann_file)
         self.mesh_point_seed = mesh_point_seed
@@ -413,6 +427,22 @@ class PoseDataset(CocoDetection):
         #         print(f"  {name}: K={K_actual + 1}")
 
         return img, target
+
+    def set_augmentation_enabled(self, enabled):
+        enabled = bool(enabled)
+        if self.augmentation_enabled == enabled:
+            return False
+
+        self.augmentation_enabled = enabled
+        if self._custom_transforms is not None:
+            return True
+
+        self._transforms = make_pose_estimation_transform(
+            self.image_set,
+            self.requested_rgb_augmentation and enabled,
+            self.requested_grayscale and enabled,
+        )
+        return True
 
 
 def convert_coco_poly_to_mask(segmentations, height, width):
@@ -758,10 +788,13 @@ class MosaicDetection(PoseDataset):
         self.shear = shear
         self.mixup_scale = mixup_scale
         self.enable_mosaic = mosaic
+        self.requested_mosaic = mosaic
+        self.augmentation_enabled = None
         self.enable_mixup = enable_mixup
         self.mosaic_prob = mosaic_prob
         self.mixup_prob = mixup_prob
         self.local_rank = dataset.local_rank
+        self.set_augmentation_enabled(dataset.augmentation_enabled)
         
     def __len__(self):
         return len(self._dataset)
@@ -847,6 +880,15 @@ class MosaicDetection(PoseDataset):
         else:
             return img, target
 
+    def set_augmentation_enabled(self, enabled):
+        enabled = bool(enabled)
+        changed = self.augmentation_enabled != enabled
+        self.augmentation_enabled = enabled
+        self.enable_mosaic = self.requested_mosaic and enabled
+        if hasattr(self._dataset, 'set_augmentation_enabled'):
+            changed = self._dataset.set_augmentation_enabled(enabled) or changed
+        return changed
+
 
 def build(image_set, args):
     root = Path(args.dataset_path)
@@ -897,12 +939,14 @@ def build(image_set, args):
         class_info = None
     # Set seed when training for reproducibility
     seed = torch.manual_seed(0)
+    augmentation_enabled = (
+        not is_train_image_set(image_set)
+        or getattr(args, 'augmentation_start_epoch', 0) <= 0
+    )
     dataset = PoseDataset(img_folder, ann_file, 
                           im_size=im_size, 
                           synthetic_background=args.synt_background,
-                          transforms=make_pose_estimation_transform(image_set, 
-                                                                    args.rgb_augmentation, 
-                                                                    args.grayscale),
+                          transforms=None,
                           return_masks=False,
                           jitter=jitter, 
                           camera=camera,
@@ -915,7 +959,10 @@ def build(image_set, args):
                           model_symmetry=model_symmetry,
                           class_info=class_info,
                           n_mesh_points=args.n_mesh_points,
-                          mesh_point_seed=args.seed)
+                          mesh_point_seed=args.seed,
+                          use_rgb_augmentation=args.rgb_augmentation,
+                          use_grayscale=args.grayscale,
+                          augmentation_enabled=augmentation_enabled)
     
     if args.mosaic_augmentation and 'train' in image_set:
         print("Creating Mosaic Augmentation")
