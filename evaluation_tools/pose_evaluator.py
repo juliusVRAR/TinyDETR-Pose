@@ -227,6 +227,111 @@ class PoseEvaluator(object):
         overall_auc = float(adds_results["accuracy"]['auc']) if num_valid_class > 0 else 0.0
         return overall_auc
 
+    def evaluate_pose_adds_01d(self, output_path):
+        """
+        Evaluate ADD(-S) accuracy at 10% of each object's diameter.
+
+        BOP ``models_info.json`` stores object diameters in millimetres, while
+        model points and translations in this evaluator are expressed in
+        metres. Symmetric objects are evaluated with ADD-S (ADI), and all
+        other objects are evaluated with ADD.
+
+        The returned score is the macro average over classes that have at
+        least one evaluated pose, matching the per-class averaging convention
+        used by the existing pose metrics.
+        """
+        output_dir = os.path.join(output_path, "adds_01d")
+        if os.path.exists(output_dir):
+            shutil.rmtree(output_dir)
+        os.makedirs(output_dir)
+
+        class_results = {}
+        class_accuracies = []
+        total_correct = 0
+        total_poses = 0
+
+        for cls_name in sorted(self.classes):
+            cls_poses_pred = self.poses_pred[cls_name]
+            cls_poses_gt = self.poses_gt[cls_name]
+            if len(cls_poses_pred) != len(cls_poses_gt):
+                raise ValueError(
+                    f"Prediction/ground-truth count mismatch for {cls_name}: "
+                    f"{len(cls_poses_pred)} != {len(cls_poses_gt)}"
+                )
+
+            model_info = self.models_info.get(cls_name)
+            if not isinstance(model_info, dict) or 'diameter' not in model_info:
+                raise KeyError(f"Missing model diameter for class {cls_name}")
+
+            diameter_m = float(model_info['diameter']) / 1000.0
+            if not np.isfinite(diameter_m) or diameter_m <= 0:
+                raise ValueError(
+                    f"Invalid model diameter for class {cls_name}: "
+                    f"{model_info['diameter']}"
+                )
+            threshold_m = 0.1 * diameter_m
+
+            model_pts = self.models[cls_name]['pts']
+            symmetric = bool(self.model_symmetry[cls_name])
+            correct = 0
+            for pose_pred, pose_gt in zip(cls_poses_pred, cls_poses_gt):
+                if symmetric:
+                    error = self.calc_adi(model_pts, pose_pred, pose_gt)
+                else:
+                    error = self.calc_add(model_pts, pose_pred, pose_gt)
+                if error < threshold_m:
+                    correct += 1
+
+            n_poses = len(cls_poses_gt)
+            accuracy = 100.0 * correct / n_poses if n_poses else None
+            if accuracy is not None:
+                class_accuracies.append(accuracy)
+                total_correct += correct
+                total_poses += n_poses
+
+            class_results[cls_name] = {
+                'symmetric': symmetric,
+                'diameter_m': diameter_m,
+                'threshold_m': threshold_m,
+                'n_poses': n_poses,
+                'correct': correct,
+                'accuracy': accuracy,
+            }
+
+        macro_accuracy = float(np.mean(class_accuracies)) if class_accuracies else 0.0
+        micro_accuracy = 100.0 * total_correct / total_poses if total_poses else 0.0
+        results = {
+            'metric': 'ADD(-S)@0.1d',
+            'diameter_source_unit': 'millimetres',
+            'threshold_fraction': 0.1,
+            'classes': class_results,
+            'accuracy': {
+                'macro': macro_accuracy,
+                'micro': micro_accuracy,
+                'n_classes': len(class_accuracies),
+                'n_poses': total_poses,
+                'correct': total_correct,
+            },
+        }
+
+        with open(os.path.join(output_dir, "adds_01d.json"), 'w') as json_file:
+            json.dump(results, json_file, indent=2)
+
+        with open(os.path.join(output_dir, "adds_01d.log"), 'w') as log_file:
+            log_file.write("Metric ADD(-S)@0.1d\n")
+            for cls_name, cls_result in class_results.items():
+                accuracy = cls_result['accuracy']
+                accuracy_text = f"{accuracy:.2f}" if accuracy is not None else "N/A"
+                log_file.write(
+                    f"{cls_name}: threshold={cls_result['threshold_m']:.8f} m, "
+                    f"correct={cls_result['correct']}/{cls_result['n_poses']}, "
+                    f"accuracy={accuracy_text}\n"
+                )
+            log_file.write(f"Macro accuracy: {macro_accuracy:.2f}\n")
+            log_file.write(f"Micro accuracy: {micro_accuracy:.2f}\n")
+
+        return macro_accuracy
+
     def evaluate_pose_adi(self, output_path):
         """
         Evaluate 6D pose by ADD-S metric

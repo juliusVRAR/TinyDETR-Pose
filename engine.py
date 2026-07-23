@@ -512,6 +512,11 @@ def pose_evaluate(model,
 
     print("Start Calculating ADD(-S)")
     results_adds = pose_evaluator.evaluate_pose_adds(output_eval_dir)
+    print("Start Calculating ADD(-S)@0.1d")
+    if hasattr(pose_evaluator, "evaluate_pose_adds_01d"):
+        results_adds_01d = pose_evaluator.evaluate_pose_adds_01d(output_eval_dir)
+    else:
+        results_adds_01d = None
     print("Start Calculating Average Translation Error")
     results_avg_translation_error = pose_evaluator.calculate_class_avg_translation_error(output_eval_dir)
     print("Start Calculating Average Rotation Error")
@@ -524,6 +529,7 @@ def pose_evaluate(model,
         'ADD': results_add,
         'ADI': results_adi,
         'ADD_minus_S': results_adds,
+        'ADD_minus_S_0.1d': results_adds_01d,
         'avg_translation_error': results_avg_translation_error,
         'avg_rotation_error': rotation_error_metrics.get('naive_all'),
         'avg_rotation_error_symmetry_aware': rotation_error_metrics.get('symmetry_aware'),
@@ -534,6 +540,7 @@ def pose_evaluate(model,
     print(f"ADD (add): {pose_metrics['ADD']}")
     print(f"ADI: {pose_metrics['ADI']}")
     print(f"ADD(-S) (adds): {pose_metrics['ADD_minus_S']}")
+    print(f"ADD(-S)@0.1d: {format_metric_value(pose_metrics['ADD_minus_S_0.1d'])}")
     print(f"Average Translation Error: {format_metric_value(pose_metrics['avg_translation_error'])}")
     print(f"Average Rotation Error (Naive): {format_metric_value(pose_metrics['avg_rotation_error'])}")
     print(f"Average Rotation Error (Symmetry-Aware): {format_metric_value(pose_metrics['avg_rotation_error_symmetry_aware'])}")
@@ -544,6 +551,7 @@ def pose_evaluate(model,
     log_file.write(f"ADD (add): {pose_metrics['ADD']}\n")
     log_file.write(f"ADI: {pose_metrics['ADI']}\n")
     log_file.write(f"ADD(-S) (adds): {pose_metrics['ADD_minus_S']}\n")
+    log_file.write(f"ADD(-S)@0.1d: {format_metric_value(pose_metrics['ADD_minus_S_0.1d'])}\n")
     log_file.write(f"Average Translation Error: {format_metric_value(pose_metrics['avg_translation_error'])}\n")
     log_file.write(f"Average Rotation Error (Naive): {format_metric_value(pose_metrics['avg_rotation_error'])}\n")
     log_file.write(f"Average Rotation Error (Symmetry-Aware): {format_metric_value(pose_metrics['avg_rotation_error_symmetry_aware'])}\n")

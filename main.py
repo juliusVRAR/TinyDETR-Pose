@@ -228,6 +228,7 @@ def build_pose_eval_summary(pose_metrics: dict,
             'ADD': optional_float(pose_metrics.get('ADD')),
             'ADI': optional_float(pose_metrics.get('ADI')),
             'ADD_minus_S': optional_float(pose_metrics.get('ADD_minus_S')),
+            'ADD_minus_S_0.1d': optional_float(pose_metrics.get('ADD_minus_S_0.1d')),
             'avg_translation_error': optional_float(pose_metrics.get('avg_translation_error')),
             'avg_rotation_error': optional_float(pose_metrics.get('avg_rotation_error')),
             'avg_rotation_error_symmetry_aware': optional_float(
@@ -989,17 +990,22 @@ def main(args):
                 current_add_score = pose_eval_results['ADD']
                 current_adi_score = pose_eval_results['ADI']
                 current_adds_score = pose_eval_results['ADD_minus_S']
+                current_adds_01d_score = pose_eval_results.get('ADD_minus_S_0.1d')
                 current_avg_translation_error = pose_eval_results['avg_translation_error']
                 current_avg_rotation_error = pose_eval_results['avg_rotation_error']
                 current_avg_rotation_error_symmetry_aware = pose_eval_results['avg_rotation_error_symmetry_aware']
                 current_avg_rotation_error_nonsymmetric_only = pose_eval_results['avg_rotation_error_nonsymmetric_only']
                 print(f"Epoch {epoch} Validation ADD(-S): {current_adds_score:.2f}%")
+                if current_adds_01d_score is not None:
+                    print(f"Epoch {epoch} Validation ADD(-S)@0.1d: {current_adds_01d_score:.2f}%")
 
                 # TensorBoard logging for pose metrics
                 if writer:
                     writer.add_scalar("val/pose_ADD", current_add_score, epoch)
                     writer.add_scalar("val/pose_ADI", current_adi_score, epoch)
                     writer.add_scalar("val/pose_ADD_minus_S", current_adds_score, epoch)
+                    if current_adds_01d_score is not None:
+                        writer.add_scalar("val/pose_ADD_minus_S_0.1d", current_adds_01d_score, epoch)
                     if current_avg_translation_error is not None:
                         writer.add_scalar("val/pose_avg_translation_error", current_avg_translation_error, epoch)
                     if current_avg_rotation_error is not None:
