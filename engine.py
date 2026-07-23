@@ -207,7 +207,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             torchvision.utils.save_image(grid, filename, nrow=nrow, padding=2, normalize=normalize)
             # print(f"Grid saved as {filename}")
         outputs = model(samples, targets)
-        rampUp=True
+        rampUp=False
         if args.adds_loss_coef > 0 and rampUp:
             # Set to finetuning of ADD-S loss after warmup and ramp-up epochs. This is a cosine schedule from 0 to args.adds_loss_coef.
             adds_weight = get_adds_weight(
