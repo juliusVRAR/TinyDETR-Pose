@@ -1313,29 +1313,52 @@ class SetCriterion(nn.Module):
 
         return losses
 
+    @staticmethod
+    def _rotation_geodesic_angle(relative_rotation):
+        trace = relative_rotation.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+        cosine = 0.5 * (trace - 1.0)
+        skew_vector = torch.stack(
+            (
+                relative_rotation[..., 2, 1] - relative_rotation[..., 1, 2],
+                relative_rotation[..., 0, 2] - relative_rotation[..., 2, 0],
+                relative_rotation[..., 1, 0] - relative_rotation[..., 0, 1],
+            ),
+            dim=-1,
+        )
+        sine = 0.5 * torch.linalg.vector_norm(skew_vector, dim=-1)
+        return torch.atan2(sine, cosine)
+
     def loss_rotation_symmetry_transform_min(self, outputs, targets, indices, num_boxes):
         idx = self._get_src_permutation_idx(indices)
+        if idx[0].numel() == 0:
+            return {"loss_rot": outputs["pred_rotations"].new_zeros(())}
 
         R_pred = self._matched_pred_rotation_matrices(outputs, targets, indices)
         R_gt = torch.cat(
             [t["relative_rotation"][i].float() for t, (_, i) in zip(targets, indices)],
             dim=0,
         ).to(device=R_pred.device, dtype=R_pred.dtype)
-
-        sym_G = torch.cat(
-            [t["symmetry_transforms"][i].float() for t, (_, i) in zip(targets, indices)],
+        is_symmetric = torch.cat(
+            [t["is_symmetric"][i].bool() for t, (_, i) in zip(targets, indices)],
             dim=0,
-        ).to(device=R_pred.device, dtype=R_pred.dtype)
+        ).to(device=R_pred.device)
 
-        R_equiv = R_gt.unsqueeze(1) @ sym_G
-        R_rel = R_pred.unsqueeze(1).transpose(-2, -1) @ R_equiv
+        relative_rotation = R_pred.transpose(-2, -1) @ R_gt
+        loss_sum = self._rotation_geodesic_angle(relative_rotation)[~is_symmetric].sum()
 
-        trace = R_rel.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
-        cos_angle = ((trace - 1.0) / 2.0).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
-        angles = torch.acos(cos_angle)
+        if is_symmetric.any():
+            symmetry_transforms = torch.cat(
+                [t["symmetry_transforms"][i].float() for t, (_, i) in zip(targets, indices)],
+                dim=0,
+            ).to(device=R_pred.device, dtype=R_pred.dtype)
+            equivalent_rotations = R_gt[is_symmetric].unsqueeze(1) @ symmetry_transforms[is_symmetric]
+            relative_equivalents = (
+                R_pred[is_symmetric].unsqueeze(1).transpose(-2, -1) @ equivalent_rotations
+            )
+            equivalent_angles = self._rotation_geodesic_angle(relative_equivalents)
+            loss_sum = loss_sum + equivalent_angles.min(dim=1).values.sum()
 
-        loss = angles.min(dim=1).values
-        return {"loss_rot": loss.sum() / num_boxes}
+        return {"loss_rot": loss_sum / max(num_boxes, 1)}
     # Test losses 
     def loss_trans_z_with_ablation(self,
                                     outputs,
@@ -1571,13 +1594,12 @@ class SetCriterion(nn.Module):
             
             # Symmtery aware L1 loss on 6D rotation representation with min distance for symmetric objects.
             # loss_rot_dict = self.loss_L1_rot_sym_aware_min_distance_z(outputs, targets, indices, num_boxes)
-            # Geodensic Loss & SARR Cosine Similarity Loss
-            #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
-            #loss_rot_dict = self.loss_rotation_symmetry_transform_min(outputs, targets, indices, num_boxes)
+            # Minimum geodesic loss over equivalent rotations for symmetric objects.
+            loss_rot_dict = self.loss_rotation_symmetry_transform_min(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
             # 6D representation with L1 loss (YOLOX6D Approach)
-            loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
             #loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint_oks(outputs, targets, indices, num_boxes)
             # L1 loss for translation xy in meters.
