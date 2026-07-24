@@ -30,3 +30,4 @@ output/*
 *.png
 slurm_*
 logs/
+*.pdf
