@@ -1542,6 +1542,622 @@ class SetCriterion(nn.Module):
         loss = torch.where(is_sym, torch.zeros_like(loss), loss)
         return {'loss_rot': loss.sum() / num_boxes}
 
+    # CAD projection loss inspired by 3d-pt
+    def loss_cad_projection(
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
+        beta=0.01,
+        z_min=1e-4,
+        invalid_depth_weight=0.25,
+    ):
+        """
+        Correspondence-preserving, symmetry-aware CAD reprojection loss.
+
+        For every matched object:
+
+            1. Transform CAD points with the predicted pose.
+            2. Transform the same points with every symmetry-equivalent
+            ground-truth pose.
+            3. Project the predicted and target points into the image.
+            4. Compare corresponding projected points.
+            5. Minimize over valid symmetry candidates.
+
+        Expected output fields:
+            pred_rotation_matrix or pred_rotation: [B, Q, 3, 3]
+            pred_translation:                      [B, Q, 3]
+
+        Expected target fields:
+            relative_rotation:   [N, 3, 3]
+            relative_position:   [N, 3]
+            model_points:        [N, P, 3]
+            intrinsics:          [3, 3], [N, 3, 3],
+                                [9], or [N, 9]
+            is_symmetric:        [N]
+
+        Optional target fields:
+            symmetry_transforms: [N, S, 3, 3]
+            model_point_valid:   [N, P]
+
+        The symmetry transformations are assumed to be rotations expressed
+        in the CAD/object coordinate system. Therefore:
+
+            R_equivalent = R_gt @ R_symmetry
+            t_equivalent = t_gt
+
+        If no symmetry bank is available, symmetric objects are excluded
+        because fixed CAD correspondences would otherwise penalize valid
+        symmetry-equivalent poses.
+        """
+
+        # ------------------------------------------------------------
+        # Select already-decoded pose predictions.
+        # ------------------------------------------------------------
+        pred_rotation_all = outputs["pred_rotations"]
+
+        pred_translation_all = outputs["pred_translations"]
+
+        # Differentiable zero used for empty batches.
+        zero = pred_translation_all.sum() * 0.0
+
+        src_idx = self._get_src_permutation_idx(indices)
+
+        if src_idx[0].numel() == 0:
+            return {"loss_cad_projection": zero}
+
+        pred_rotation = pred_rotation_all[src_idx]
+        pred_translation = pred_translation_all[src_idx]
+
+        if pred_rotation.shape[-2:] != (3, 3):
+            raise ValueError(
+                "The CAD projection loss requires decoded 3x3 rotation "
+                "matrices. Decode the 6D/SARR output before this loss."
+            )
+
+        device = pred_translation.device
+
+        # Use float32 for projection stability, including under AMP.
+        dtype = torch.float32
+
+        pred_rotation = pred_rotation.to(dtype=dtype)
+        pred_translation = pred_translation.to(dtype=dtype)
+
+        # ------------------------------------------------------------
+        # Gather matched target values in the same order as predictions.
+        # ------------------------------------------------------------
+        def concatenate_matched_targets(key, target_dtype=None):
+            values = []
+
+            for target, (_, target_indices) in zip(targets, indices):
+                if target_indices.numel() == 0:
+                    continue
+
+                if key not in target:
+                    raise KeyError(
+                        f"Each matched target must contain target['{key}']."
+                    )
+
+                value = target[key]
+                selected = value[
+                    target_indices.to(device=value.device)
+                ]
+                values.append(selected)
+
+            if not values:
+                return None
+
+            result = torch.cat(values, dim=0).to(device=device)
+
+            if target_dtype is not None:
+                result = result.to(dtype=target_dtype)
+
+            return result
+
+        gt_rotation = concatenate_matched_targets(
+            "relative_rotation",
+            dtype,
+        )
+        gt_translation = concatenate_matched_targets(
+            "relative_position",
+            dtype,
+        )
+        model_points = concatenate_matched_targets(
+            "model_points",
+            dtype,
+        )
+
+        if gt_rotation is None or gt_rotation.shape[0] == 0:
+            return {"loss_cad_projection": zero}
+
+        number_of_matches = pred_translation.shape[0]
+
+        if gt_rotation.shape[0] != number_of_matches:
+            raise ValueError(
+                "The number of matched predictions and targets differs: "
+                f"{number_of_matches} predictions versus "
+                f"{gt_rotation.shape[0]} targets."
+            )
+
+        # ------------------------------------------------------------
+        # Gather one camera matrix for every matched object.
+        # ------------------------------------------------------------
+        matched_camera_matrices = []
+
+        for target, (_, target_indices) in zip(targets, indices):
+            current_number_of_matches = target_indices.numel()
+
+            if current_number_of_matches == 0:
+                continue
+
+            if "intrinsics" not in target:
+                raise KeyError(
+                    "Each target must contain target['intrinsics']."
+                )
+
+            camera_matrix = target["intrinsics"]
+            number_of_targets = target["relative_rotation"].shape[0]
+
+            # Shared flattened camera matrix: [9].
+            if camera_matrix.ndim == 1:
+                if camera_matrix.numel() != 9:
+                    raise ValueError(
+                        "A one-dimensional intrinsics tensor must contain "
+                        f"9 values, but received {camera_matrix.numel()}."
+                    )
+
+                camera_matrix = camera_matrix.reshape(1, 3, 3).expand(
+                    current_number_of_matches,
+                    -1,
+                    -1,
+                )
+
+            # Either one shared [3, 3] matrix or [N, 9].
+            elif camera_matrix.ndim == 2:
+                if camera_matrix.shape == (3, 3):
+                    camera_matrix = camera_matrix.unsqueeze(0).expand(
+                        current_number_of_matches,
+                        -1,
+                        -1,
+                    )
+
+                elif camera_matrix.shape[-1] == 9:
+                    camera_matrix = camera_matrix.reshape(-1, 3, 3)
+
+                    if camera_matrix.shape[0] == number_of_targets:
+                        camera_matrix = camera_matrix[
+                            target_indices.to(camera_matrix.device)
+                        ]
+                    elif camera_matrix.shape[0] == 1:
+                        camera_matrix = camera_matrix.expand(
+                            current_number_of_matches,
+                            -1,
+                            -1,
+                        )
+                    elif (
+                        camera_matrix.shape[0]
+                        != current_number_of_matches
+                    ):
+                        raise ValueError(
+                            "Unsupported target['intrinsics'] shape: "
+                            f"{tuple(target['intrinsics'].shape)}."
+                        )
+                else:
+                    raise ValueError(
+                        "A two-dimensional intrinsics tensor must have "
+                        "shape [3, 3], [1, 9], or [N, 9], but received "
+                        f"{tuple(camera_matrix.shape)}."
+                    )
+
+            # Per-object camera matrices: [N, 3, 3].
+            elif (
+                camera_matrix.ndim == 3
+                and camera_matrix.shape[-2:] == (3, 3)
+            ):
+                if camera_matrix.shape[0] == number_of_targets:
+                    camera_matrix = camera_matrix[
+                        target_indices.to(camera_matrix.device)
+                    ]
+                elif camera_matrix.shape[0] == 1:
+                    camera_matrix = camera_matrix.expand(
+                        current_number_of_matches,
+                        -1,
+                        -1,
+                    )
+                elif (
+                    camera_matrix.shape[0]
+                    != current_number_of_matches
+                ):
+                    raise ValueError(
+                        "Unsupported target['intrinsics'] shape: "
+                        f"{tuple(camera_matrix.shape)}."
+                    )
+
+            else:
+                raise ValueError(
+                    "target['intrinsics'] must have shape [3, 3], "
+                    "[N, 3, 3], [9], or [N, 9], but received "
+                    f"{tuple(camera_matrix.shape)}."
+                )
+
+            matched_camera_matrices.append(camera_matrix)
+
+        camera_matrix = torch.cat(
+            matched_camera_matrices,
+            dim=0,
+        ).to(device=device, dtype=dtype)
+
+        if camera_matrix.shape[0] != number_of_matches:
+            raise ValueError(
+                "The number of gathered camera matrices does not match "
+                f"the number of objects: {camera_matrix.shape[0]} versus "
+                f"{number_of_matches}."
+            )
+
+        # ------------------------------------------------------------
+        # Optional validity mask for padded CAD point tensors.
+        # ------------------------------------------------------------
+        matched_targets = [
+            target
+            for target, (_, target_indices) in zip(targets, indices)
+            if target_indices.numel() > 0
+        ]
+
+        if all(
+            "model_point_valid" in target
+            for target in matched_targets
+        ):
+            point_valid = concatenate_matched_targets(
+                "model_point_valid"
+            ).bool()
+        else:
+            point_valid = torch.ones(
+                model_points.shape[:2],
+                dtype=torch.bool,
+                device=device,
+            )
+
+        # Reject non-finite CAD points even if no explicit mask exists.
+        point_valid = (
+            point_valid
+            & torch.isfinite(model_points).all(dim=-1)
+        )
+
+        # ------------------------------------------------------------
+        # Load the rotation-only symmetry bank.
+        # ------------------------------------------------------------
+        has_symmetry_bank = all(
+            "symmetry_transforms" in target
+            for target in matched_targets
+        )
+
+        if has_symmetry_bank:
+            symmetry_rotation = concatenate_matched_targets(
+                "symmetry_transforms",
+                dtype,
+            )
+
+            # Convert [M, 3, 3] into [M, 1, 3, 3].
+            if symmetry_rotation.ndim == 3:
+                symmetry_rotation = symmetry_rotation.unsqueeze(1)
+
+            if (
+                symmetry_rotation.ndim != 4
+                or symmetry_rotation.shape[-2:] != (3, 3)
+            ):
+                raise ValueError(
+                    "Expected symmetry_transforms with shape "
+                    "[M, S, 3, 3], but received "
+                    f"{tuple(symmetry_rotation.shape)}."
+                )
+
+            number_of_objects = symmetry_rotation.shape[0]
+
+            if number_of_objects != pred_translation.shape[0]:
+                raise ValueError(
+                    "The symmetry-bank object count does not match the "
+                    "number of matched objects: "
+                    f"{number_of_objects} versus "
+                    f"{pred_translation.shape[0]}."
+                )
+
+            identity = torch.eye(
+                3,
+                dtype=dtype,
+                device=device,
+            )
+
+            # Infer whether each entry is a finite, proper rotation matrix.
+            # This rejects zero-matrix padding while identity padding remains
+            # valid and harmless.
+            symmetry_check = symmetry_rotation.float()
+
+            gram_matrix = (
+                symmetry_check.transpose(-1, -2)
+                @ symmetry_check
+            )
+
+            symmetry_valid = (
+                torch.isfinite(symmetry_check).all(dim=(-1, -2))
+                & (
+                    gram_matrix - identity
+                ).abs().amax(dim=(-1, -2)).lt(1e-3)
+                & (
+                    torch.det(symmetry_check) - 1.0
+                ).abs().lt(1e-3)
+            )
+
+            # Always include identity so every object has at least one
+            # valid pose candidate.
+            identity_bank = identity.view(1, 1, 3, 3).expand(
+                number_of_objects,
+                1,
+                3,
+                3,
+            )
+
+            symmetry_rotation = torch.cat(
+                [identity_bank, symmetry_rotation],
+                dim=1,
+            )
+
+            symmetry_valid = torch.cat(
+                [
+                    torch.ones(
+                        number_of_objects,
+                        1,
+                        dtype=torch.bool,
+                        device=device,
+                    ),
+                    symmetry_valid,
+                ],
+                dim=1,
+            )
+
+        else:
+            # Without an explicit symmetry bank, fixed CAD
+            # correspondences are only valid for asymmetric objects.
+            if not all(
+                "is_symmetric" in target
+                for target in matched_targets
+            ):
+                raise KeyError(
+                    "Targets without symmetry_transforms must provide "
+                    "target['is_symmetric']."
+                )
+
+            is_symmetric = concatenate_matched_targets(
+                "is_symmetric"
+            ).bool().reshape(-1)
+
+            keep = ~is_symmetric
+
+            if not keep.any():
+                return {"loss_cad_projection": zero}
+
+            pred_rotation = pred_rotation[keep]
+            pred_translation = pred_translation[keep]
+            gt_rotation = gt_rotation[keep]
+            gt_translation = gt_translation[keep]
+            model_points = model_points[keep]
+            point_valid = point_valid[keep]
+            camera_matrix = camera_matrix[keep]
+
+            number_of_objects = pred_translation.shape[0]
+
+            symmetry_rotation = torch.eye(
+                3,
+                dtype=dtype,
+                device=device,
+            ).view(1, 1, 3, 3).expand(
+                number_of_objects,
+                1,
+                3,
+                3,
+            )
+
+            symmetry_valid = torch.ones(
+                number_of_objects,
+                1,
+                dtype=torch.bool,
+                device=device,
+            )
+
+        # ------------------------------------------------------------
+        # Construct symmetry-equivalent ground-truth poses.
+        # ------------------------------------------------------------
+        gt_rotation_candidates = (
+            gt_rotation[:, None] @ symmetry_rotation
+        )
+
+        # Rotation-only symmetries do not alter translation.
+        gt_translation_candidates = gt_translation[:, None, :].expand(
+            -1,
+            symmetry_rotation.shape[1],
+            -1,
+        )
+
+        # ------------------------------------------------------------
+        # Transform CAD points into camera coordinates.
+        # ------------------------------------------------------------
+        predicted_points_camera = (
+            torch.einsum(
+                "nij,npj->npi",
+                pred_rotation,
+                model_points,
+            )
+            + pred_translation[:, None, :]
+        )
+
+        target_points_camera = (
+            torch.einsum(
+                "nsij,npj->nspi",
+                gt_rotation_candidates,
+                model_points,
+            )
+            + gt_translation_candidates[:, :, None, :]
+        )
+
+        # ------------------------------------------------------------
+        # Project predicted CAD points.
+        # ------------------------------------------------------------
+        predicted_homogeneous = torch.einsum(
+            "nij,npj->npi",
+            camera_matrix,
+            predicted_points_camera,
+        )
+
+        predicted_uv = (
+            predicted_homogeneous[..., :2]
+            / predicted_homogeneous[..., 2:3].clamp_min(z_min)
+        )
+
+        # ------------------------------------------------------------
+        # Project all symmetry-equivalent target CAD points.
+        # ------------------------------------------------------------
+        target_homogeneous = torch.einsum(
+            "nij,nspj->nspi",
+            camera_matrix,
+            target_points_camera,
+        )
+
+        target_uv = (
+            target_homogeneous[..., :2]
+            / target_homogeneous[..., 2:3].clamp_min(z_min)
+        )
+
+        target_in_front = (
+            target_points_camera[..., 2] > z_min
+        )
+
+        valid_points = (
+            point_valid[:, None, :]
+            & target_in_front
+            & torch.isfinite(target_uv).all(dim=-1)
+        )
+
+        # ------------------------------------------------------------
+        # Scale normalization using the projected CAD diagonal.
+        # ------------------------------------------------------------
+        positive_infinity = torch.tensor(
+            float("inf"),
+            device=device,
+            dtype=dtype,
+        )
+        negative_infinity = torch.tensor(
+            float("-inf"),
+            device=device,
+            dtype=dtype,
+        )
+
+        target_uv_min = target_uv.masked_fill(
+            ~valid_points[..., None],
+            positive_infinity,
+        ).amin(dim=2)
+
+        target_uv_max = target_uv.masked_fill(
+            ~valid_points[..., None],
+            negative_infinity,
+        ).amax(dim=2)
+
+        projected_diagonal = torch.linalg.vector_norm(
+            target_uv_max - target_uv_min,
+            dim=-1,
+        ).clamp_min(1e-6)
+
+        normalized_difference = (
+            predicted_uv[:, None, :, :] - target_uv
+        ) / projected_diagonal[:, :, None, None]
+
+        point_distance = torch.linalg.vector_norm(
+            normalized_difference,
+            dim=-1,
+        )
+
+        # ------------------------------------------------------------
+        # Radial Smooth-L1 correspondence loss.
+        # ------------------------------------------------------------
+        point_loss = torch.where(
+            point_distance < beta,
+            0.5 * point_distance.square() / beta,
+            point_distance - 0.5 * beta,
+        )
+
+        valid_count = valid_points.sum(
+            dim=-1
+        ).clamp_min(1).to(dtype=dtype)
+
+        candidate_loss = (
+            point_loss
+            * valid_points.to(dtype=dtype)
+        ).sum(dim=-1) / valid_count
+
+        # ------------------------------------------------------------
+        # Penalize predictions behind the camera.
+        # ------------------------------------------------------------
+        predicted_invalid = (
+            (
+                predicted_points_camera[..., 2] <= z_min
+            )
+            | ~torch.isfinite(
+                predicted_points_camera
+            ).all(dim=-1)
+        ) & point_valid
+
+        predicted_invalid_fraction = (
+            predicted_invalid.to(dtype=dtype).sum(dim=-1)
+            / point_valid.sum(dim=-1).clamp_min(1).to(dtype=dtype)
+        )
+
+        candidate_loss = (
+            candidate_loss
+            + invalid_depth_weight
+            * predicted_invalid_fraction[:, None]
+        )
+
+        # A candidate is usable only if its symmetry transformation is
+        # valid and at least one CAD point can be projected.
+        candidate_is_valid = (
+            symmetry_valid
+            & valid_points.any(dim=-1)
+        )
+
+        candidate_loss = candidate_loss.masked_fill(
+            ~candidate_is_valid,
+            float("inf"),
+        )
+
+        # ------------------------------------------------------------
+        # Minimize over symmetry-equivalent target poses.
+        # ------------------------------------------------------------
+        loss_per_object = candidate_loss.min(dim=1).values
+
+        # Ignore malformed objects with no projectable CAD points.
+        loss_per_object = loss_per_object[
+            torch.isfinite(loss_per_object)
+        ]
+
+        if loss_per_object.numel() == 0:
+            return {"loss_cad_projection": zero}
+
+        if torch.is_tensor(num_boxes):
+            normalizer = num_boxes.to(
+                device=device,
+                dtype=dtype,
+            ).clamp_min(1.0)
+        else:
+            normalizer = max(float(num_boxes), 1.0)
+
+        loss = loss_per_object.sum() / normalizer
+
+        return {
+            "loss_cad_projection": loss,
+        }
+
+
+
+
     # Put all pose losses together
     def loss_pose(self, 
               outputs, 
@@ -1586,7 +2202,18 @@ class SetCriterion(nn.Module):
 
             # Compute individual losses
             # ADD(-S) Loss (Symmetry-aware point-to-point)
-            loss_adds_dict = self.loss_adds(outputs, targets, indices, num_boxes)
+            # loss_adds_dict = self.loss_adds(
+            #     outputs, 
+            #     targets,
+            #     indices, 
+            #     num_boxes)
+            # Projected CAD correspondence loss. TODO: IF this loss works better rename to loss_projection_dict
+            loss_adds_dict = self.loss_cad_projection(
+                outputs,
+                targets,
+                indices,
+                num_boxes,
+            )
             # Symmteric Aware Rotation Loss (Symmetric objects → ADD-S, Non-symmetric → Geodesic + ADD) 
             #loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
             # Symmetric Aware Rotation Loss derived from T6D.
@@ -1605,19 +2232,31 @@ class SetCriterion(nn.Module):
             
             
             # 6D representation with L1 loss (YOLOX6D Approach)
-            loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rot(
+                outputs, 
+                targets, 
+                indices, 
+                num_boxes)
 
             #loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
-            loss_kpt_dict = self.loss_keypoint_oks(outputs, targets, indices, num_boxes)
+            loss_kpt_dict = self.loss_keypoint_oks(
+                outputs, 
+                targets, 
+                indices,
+                num_boxes)
             # L1 loss for translation xy in meters.
             #loss_trans_xy = self.loss_trans_xy(outputs, targets, indices, num_boxes)
 
             # trans-z Losses (depth)
-            loss_trans_z = self.loss_trans_z_smooth_l1(outputs, targets, indices, num_boxes)
+            loss_trans_z = self.loss_trans_z_smooth_l1(
+                outputs,
+                targets, 
+                indices, 
+                num_boxes)
             #loss_trans_z= self.loss_trans_z_with_ablation(outputs, targets, indices, num_boxes)
             
             # Extract loss values
-            loss_adds = loss_adds_dict['loss_adds']
+            loss_adds = loss_adds_dict['loss_cad_projection']
             loss_rot = loss_rot_dict['loss_rot']
             #loss_trans = loss_trans_dict['loss_translation']
             loss_kpt = loss_kpt_dict['loss_keypoint']
