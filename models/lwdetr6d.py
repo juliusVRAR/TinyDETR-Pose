@@ -1591,15 +1591,22 @@ class SetCriterion(nn.Module):
             #loss_rot_dict = self.loss_rotation_ablate(outputs, targets, indices, num_boxes)
             # Symmetric Aware Rotation Loss derived from T6D.
             #loss_rot_dict = self.loss_rotation_sym_aware_T6D(outputs, targets, indices, num_boxes)
+           
+            # If SARR is used, then use the SARR loss. Otherwise, use the geodesic loss.
+            #loss_rot_dict = self.loss_rotation(outputs, targets, indices, num_boxes)
             
             # Symmtery aware L1 loss on 6D rotation representation with min distance for symmetric objects.
-            # loss_rot_dict = self.loss_L1_rot_sym_aware_min_distance_z(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_L1_rot_sym_aware_min_distance_z(outputs, targets, indices, num_boxes)
+            
             # Minimum geodesic loss over equivalent rotations for symmetric objects.
-            loss_rot_dict = self.loss_rotation_symmetry_transform_min(outputs, targets, indices, num_boxes)
+            #loss_rot_dict = self.loss_rotation_symmetry_transform_min(outputs, targets, indices, num_boxes)
             # Geodensic Loss symmetry aware. Sucks
             #loss_rot_dict = self.loss_rotation_sym(outputs, targets, indices, num_boxes)
+            
+            
             # 6D representation with L1 loss (YOLOX6D Approach)
-            #loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
+            loss_rot_dict = self.loss_rot(outputs, targets, indices, num_boxes)
+
             #loss_kpt_dict = self.loss_keypoint(outputs, targets, indices, num_boxes)
             loss_kpt_dict = self.loss_keypoint_oks(outputs, targets, indices, num_boxes)
             # L1 loss for translation xy in meters.
