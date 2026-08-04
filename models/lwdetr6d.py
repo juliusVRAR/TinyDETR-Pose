@@ -1579,13 +1579,14 @@ class SetCriterion(nn.Module):
 
         Optional target fields:
             symmetry_transforms: [N, S, 3, 3]
+            symmetry_translations: [N, S, 3]
             model_point_valid:   [N, P]
 
-        The symmetry transformations are assumed to be rotations expressed
-        in the CAD/object coordinate system. Therefore:
+        The symmetry transformations are expressed in the CAD/object
+        coordinate system. Therefore:
 
             R_equivalent = R_gt @ R_symmetry
-            t_equivalent = t_gt
+            t_equivalent = t_gt + R_gt @ t_symmetry
 
         If no symmetry bank is available, symmetric objects are excluded
         because fixed CAD correspondences would otherwise penalize valid
@@ -1599,16 +1600,24 @@ class SetCriterion(nn.Module):
 
         pred_translation_all = outputs["pred_translations"]
 
-        # Differentiable zero used for empty batches.
-        zero = pred_translation_all.sum() * 0.0
+        zero = pred_translation_all.reshape(-1)[:0].sum()
 
         src_idx = self._get_src_permutation_idx(indices)
 
         if src_idx[0].numel() == 0:
-            return {"loss_cad_projection": zero}
+            return {"loss_adds": zero}
 
         pred_rotation = pred_rotation_all[src_idx]
         pred_translation = pred_translation_all[src_idx]
+
+        if not (
+            torch.isfinite(pred_rotation).all()
+            and torch.isfinite(pred_translation).all()
+        ):
+            raise FloatingPointError(
+                "The CAD projection loss received non-finite matched pose "
+                "predictions."
+            )
 
         if pred_rotation.shape[-2:] != (3, 3):
             raise ValueError(
@@ -1669,7 +1678,7 @@ class SetCriterion(nn.Module):
         )
 
         if gt_rotation is None or gt_rotation.shape[0] == 0:
-            return {"loss_cad_projection": zero}
+            return {"loss_adds": zero}
 
         number_of_matches = pred_translation.shape[0]
 
@@ -1823,9 +1832,14 @@ class SetCriterion(nn.Module):
             point_valid
             & torch.isfinite(model_points).all(dim=-1)
         )
+        model_points = torch.where(
+            point_valid[..., None],
+            model_points,
+            torch.zeros_like(model_points),
+        )
 
         # ------------------------------------------------------------
-        # Load the rotation-only symmetry bank.
+        # Load the object-space symmetry bank.
         # ------------------------------------------------------------
         has_symmetry_bank = all(
             "symmetry_transforms" in target
@@ -1838,9 +1852,38 @@ class SetCriterion(nn.Module):
                 dtype,
             )
 
+            has_symmetry_translations = all(
+                "symmetry_translations" in target
+                for target in matched_targets
+            )
+            if any(
+                "symmetry_translations" in target
+                for target in matched_targets
+            ) and not has_symmetry_translations:
+                raise KeyError(
+                    "Either every matched target or no matched target must "
+                    "provide target['symmetry_translations']."
+                )
+
+            if has_symmetry_translations:
+                symmetry_translation = concatenate_matched_targets(
+                    "symmetry_translations",
+                    dtype,
+                )
+                if symmetry_translation.ndim == 2:
+                    symmetry_translation = symmetry_translation.unsqueeze(1)
+
             # Convert [M, 3, 3] into [M, 1, 3, 3].
             if symmetry_rotation.ndim == 3:
                 symmetry_rotation = symmetry_rotation.unsqueeze(1)
+
+            if not has_symmetry_translations:
+                symmetry_translation = torch.zeros(
+                    *symmetry_rotation.shape[:2],
+                    3,
+                    dtype=dtype,
+                    device=device,
+                )
 
             if (
                 symmetry_rotation.ndim != 4
@@ -1850,6 +1893,18 @@ class SetCriterion(nn.Module):
                     "Expected symmetry_transforms with shape "
                     "[M, S, 3, 3], but received "
                     f"{tuple(symmetry_rotation.shape)}."
+                )
+
+            if (
+                symmetry_translation.ndim != 3
+                or symmetry_translation.shape[-1] != 3
+                or symmetry_translation.shape[:2]
+                != symmetry_rotation.shape[:2]
+            ):
+                raise ValueError(
+                    "Expected symmetry_translations aligned with "
+                    "symmetry_transforms and shaped [M, S, 3], but received "
+                    f"{tuple(symmetry_translation.shape)}."
                 )
 
             number_of_objects = symmetry_rotation.shape[0]
@@ -1880,6 +1935,7 @@ class SetCriterion(nn.Module):
 
             symmetry_valid = (
                 torch.isfinite(symmetry_check).all(dim=(-1, -2))
+                & torch.isfinite(symmetry_translation).all(dim=-1)
                 & (
                     gram_matrix - identity
                 ).abs().amax(dim=(-1, -2)).lt(1e-3)
@@ -1899,6 +1955,19 @@ class SetCriterion(nn.Module):
 
             symmetry_rotation = torch.cat(
                 [identity_bank, symmetry_rotation],
+                dim=1,
+            )
+            symmetry_translation = torch.cat(
+                [
+                    torch.zeros(
+                        number_of_objects,
+                        1,
+                        3,
+                        dtype=dtype,
+                        device=device,
+                    ),
+                    symmetry_translation,
+                ],
                 dim=1,
             )
 
@@ -1934,7 +2003,7 @@ class SetCriterion(nn.Module):
             keep = ~is_symmetric
 
             if not keep.any():
-                return {"loss_cad_projection": zero}
+                return {"loss_adds": zero}
 
             pred_rotation = pred_rotation[keep]
             pred_translation = pred_translation[keep]
@@ -1956,6 +2025,13 @@ class SetCriterion(nn.Module):
                 3,
                 3,
             )
+            symmetry_translation = torch.zeros(
+                number_of_objects,
+                1,
+                3,
+                dtype=dtype,
+                device=device,
+            )
 
             symmetry_valid = torch.ones(
                 number_of_objects,
@@ -1971,11 +2047,13 @@ class SetCriterion(nn.Module):
             gt_rotation[:, None] @ symmetry_rotation
         )
 
-        # Rotation-only symmetries do not alter translation.
-        gt_translation_candidates = gt_translation[:, None, :].expand(
-            -1,
-            symmetry_rotation.shape[1],
-            -1,
+        gt_translation_candidates = (
+            gt_translation[:, None, :]
+            + torch.einsum(
+                "nij,nsj->nsi",
+                gt_rotation,
+                symmetry_translation,
+            )
         )
 
         # ------------------------------------------------------------
@@ -2008,9 +2086,22 @@ class SetCriterion(nn.Module):
             predicted_points_camera,
         )
 
+        predicted_in_front = (
+            predicted_points_camera[..., 2] > z_min
+        )
+        predicted_projectable = (
+            point_valid
+            & predicted_in_front
+            & torch.isfinite(predicted_homogeneous).all(dim=-1)
+        )
+        predicted_depth = torch.where(
+            predicted_projectable,
+            predicted_homogeneous[..., 2],
+            torch.ones_like(predicted_homogeneous[..., 2]),
+        )
         predicted_uv = (
             predicted_homogeneous[..., :2]
-            / predicted_homogeneous[..., 2:3].clamp_min(z_min)
+            / predicted_depth[..., None]
         )
 
         # ------------------------------------------------------------
@@ -2031,10 +2122,14 @@ class SetCriterion(nn.Module):
             target_points_camera[..., 2] > z_min
         )
 
-        valid_points = (
+        target_valid_points = (
             point_valid[:, None, :]
             & target_in_front
             & torch.isfinite(target_uv).all(dim=-1)
+        )
+        correspondence_valid = (
+            target_valid_points
+            & predicted_projectable[:, None, :]
         )
 
         # ------------------------------------------------------------
@@ -2052,12 +2147,12 @@ class SetCriterion(nn.Module):
         )
 
         target_uv_min = target_uv.masked_fill(
-            ~valid_points[..., None],
+            ~target_valid_points[..., None],
             positive_infinity,
         ).amin(dim=2)
 
         target_uv_max = target_uv.masked_fill(
-            ~valid_points[..., None],
+            ~target_valid_points[..., None],
             negative_infinity,
         ).amax(dim=2)
 
@@ -2084,43 +2179,40 @@ class SetCriterion(nn.Module):
             point_distance - 0.5 * beta,
         )
 
-        valid_count = valid_points.sum(
+        valid_count = correspondence_valid.sum(
             dim=-1
         ).clamp_min(1).to(dtype=dtype)
 
         candidate_loss = (
             point_loss
-            * valid_points.to(dtype=dtype)
+            * correspondence_valid.to(dtype=dtype)
         ).sum(dim=-1) / valid_count
 
         # ------------------------------------------------------------
         # Penalize predictions behind the camera.
         # ------------------------------------------------------------
-        predicted_invalid = (
-            (
-                predicted_points_camera[..., 2] <= z_min
-            )
-            | ~torch.isfinite(
-                predicted_points_camera
-            ).all(dim=-1)
-        ) & point_valid
-
-        predicted_invalid_fraction = (
-            predicted_invalid.to(dtype=dtype).sum(dim=-1)
+        target_depth_scale = gt_translation[..., 2].abs().clamp_min(
+            z_min
+        )
+        predicted_depth_shortfall = F.relu(
+            z_min - predicted_points_camera[..., 2]
+        ) / target_depth_scale[:, None]
+        predicted_depth_penalty = (
+            (predicted_depth_shortfall * point_valid.to(dtype=dtype)).sum(dim=-1)
             / point_valid.sum(dim=-1).clamp_min(1).to(dtype=dtype)
         )
 
         candidate_loss = (
             candidate_loss
             + invalid_depth_weight
-            * predicted_invalid_fraction[:, None]
+            * predicted_depth_penalty[:, None]
         )
 
         # A candidate is usable only if its symmetry transformation is
         # valid and at least one CAD point can be projected.
         candidate_is_valid = (
             symmetry_valid
-            & valid_points.any(dim=-1)
+            & target_valid_points.any(dim=-1)
         )
 
         candidate_loss = candidate_loss.masked_fill(
@@ -2139,7 +2231,7 @@ class SetCriterion(nn.Module):
         ]
 
         if loss_per_object.numel() == 0:
-            return {"loss_cad_projection": zero}
+            return {"loss_adds": zero}
 
         if torch.is_tensor(num_boxes):
             normalizer = num_boxes.to(
@@ -2152,7 +2244,7 @@ class SetCriterion(nn.Module):
         loss = loss_per_object.sum() / normalizer
 
         return {
-            "loss_cad_projection": loss,
+            "loss_adds": loss,
         }
 
 
@@ -2207,7 +2299,7 @@ class SetCriterion(nn.Module):
             #     targets,
             #     indices, 
             #     num_boxes)
-            # Projected CAD correspondence loss. TODO: IF this loss works better rename to loss_projection_dict
+            # Projected CAD correspondence loss.
             loss_adds_dict = self.loss_cad_projection(
                 outputs,
                 targets,
@@ -2256,7 +2348,7 @@ class SetCriterion(nn.Module):
             #loss_trans_z= self.loss_trans_z_with_ablation(outputs, targets, indices, num_boxes)
             
             # Extract loss values
-            loss_adds = loss_adds_dict['loss_cad_projection']
+            loss_adds = loss_adds_dict['loss_adds']
             loss_rot = loss_rot_dict['loss_rot']
             #loss_trans = loss_trans_dict['loss_translation']
             loss_kpt = loss_kpt_dict['loss_keypoint']

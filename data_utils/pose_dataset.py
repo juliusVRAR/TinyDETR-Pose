@@ -35,6 +35,7 @@ from util.rotation_utils import (
     precompute_points,
     build_symmetry_transforms,
     pad_symmetry_transforms,
+    pad_symmetry_translations,
     get_sarr_symmetry_vectors,
     rotation_matrix_to_sarr,
 )
@@ -203,8 +204,16 @@ class PoseDataset(CocoDetection):
         self._symmetry_info = {}
         
         # Build once needed for sym. aware L1 loss; dict[obj_id] -> (K, 3, 3) tensor of symmetry transforms
-        raw = build_symmetry_transforms(cad_models_path, K_continuous=360)
-        self.sym_transforms, self.max_K = pad_symmetry_transforms(raw) # self.sym_transforms: {obj_id: (K, 3, 3)}
+        raw_rotations, raw_translations = build_symmetry_transforms(
+            cad_models_path,
+            K_continuous=360,
+            return_translations=True,
+        )
+        self.sym_transforms, self.max_K = pad_symmetry_transforms(raw_rotations)
+        self.sym_translations = pad_symmetry_translations(
+            raw_translations,
+            self.max_K,
+        )
         
         if model_symmetry is not None and Path(model_symmetry).is_file():
             sample_mesh_points = True
@@ -406,14 +415,24 @@ class PoseDataset(CocoDetection):
 
         if len(labels) and self.sym_transforms:
             sym_list = []
+            sym_translation_list = []
             for cid in labels.tolist():
                 sym = self.sym_transforms.get(int(cid), None)
                 if sym is None:
                     sym = torch.eye(3).unsqueeze(0).expand(self.max_K, 3, 3).clone()
+                sym_translation = self.sym_translations.get(int(cid), None)
+                if sym_translation is None:
+                    sym_translation = torch.zeros(self.max_K, 3)
                 sym_list.append(sym)
+                sym_translation_list.append(sym_translation)
             target["symmetry_transforms"] = torch.stack(sym_list, dim=0)
+            target["symmetry_translations"] = torch.stack(
+                sym_translation_list,
+                dim=0,
+            )
         else:
             target["symmetry_transforms"] = torch.zeros(0, self.max_K, 3, 3)
+            target["symmetry_translations"] = torch.zeros(0, self.max_K, 3)
         
 
         # Sanaty check the symmetry transforms and print K for each object
