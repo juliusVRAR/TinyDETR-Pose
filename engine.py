@@ -27,6 +27,7 @@ import os
 import numpy as np
 import time
 from evaluation_tools.metrics import get_src_permutation_idx, calc_rotation_error, calc_translation_error
+from evaluation_tools.pose_evaluator_init import resolve_pose_class_name
 from util.rotation_utils import rotation_6d_to_matrix
 DEBUG = False
 DEBUG_OUT=Path("debug")
@@ -476,7 +477,7 @@ def pose_evaluate(model,
         # Iterate over all predicted objects and save them in the pose evaluator
         for cls_idx, img_file, intrinsic, pred_translation, pred_rotation, tgt_translation, tgt_rotation in \
                 zip(obj_classes_idx, img_files, intrinsics, pred_translations, pred_rotations, tgt_translations, tgt_rotations):
-            cls = pose_evaluator.classes[cls_idx - 1]
+            cls = resolve_pose_class_name(pose_evaluator, cls_idx)
             pose_evaluator.poses_pred[cls].append(
                 np.concatenate((pred_rotation, pred_translation.reshape(3, 1)), axis=1))
             pose_evaluator.poses_gt[cls].append(

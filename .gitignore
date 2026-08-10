@@ -8,6 +8,7 @@
 .ipynb_checkpoints/
 data/coco/
 data/obj365/
+data/lmo
 experiment-*
 *.tmp
 *.pkl

@@ -22,6 +22,50 @@ def load_classes(path):
     return classes
 
 
+def build_class_id_to_name(classes):
+    """Convert the JSON class mapping to integer object IDs."""
+    if not isinstance(classes, dict):
+        raise TypeError("Class information must be a mapping from object ID to class name.")
+
+    class_id_to_name = {}
+    for class_id, class_name in classes.items():
+        try:
+            class_id = int(class_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid object ID in class information: {class_id!r}") from exc
+
+        if class_id in class_id_to_name:
+            raise ValueError(f"Duplicate object ID in class information: {class_id}")
+        class_id_to_name[class_id] = class_name
+
+    return class_id_to_name
+
+
+def resolve_pose_class_name(pose_evaluator, class_id):
+    """Resolve a dataset object ID without assuming that IDs are contiguous."""
+    class_id = int(class_id)
+    class_id_to_name = getattr(pose_evaluator, "class_id_to_name", None)
+    if class_id_to_name is not None:
+        try:
+            return class_id_to_name[class_id]
+        except KeyError as exc:
+            available_ids = sorted(class_id_to_name)
+            raise KeyError(
+                f"Object ID {class_id} is missing from the pose evaluator class mapping. "
+                f"Available IDs: {available_ids}"
+            ) from exc
+
+    # Preserve compatibility for evaluators created directly with contiguous
+    # one-based class IDs instead of through build_pose_evaluator().
+    class_index = class_id - 1
+    if 0 <= class_index < len(pose_evaluator.classes):
+        return pose_evaluator.classes[class_index]
+    raise KeyError(
+        f"Object ID {class_id} cannot be resolved because the pose evaluator "
+        "has no class_id_to_name mapping."
+    )
+
+
 def load_model_info(points):
     """
     Load information about the 3D model from the BOP files
@@ -79,6 +123,7 @@ def build_pose_evaluator(args):
     """
     classes_path = args.dataset_path + args.class_info
     classes = load_classes(classes_path)
+    class_id_to_name = build_class_id_to_name(classes)
 
     models_path = args.dataset_path + args.models
     models, models_info = load_models(models_path, classes)
@@ -92,6 +137,7 @@ def build_pose_evaluator(args):
         evaluator = PoseEvaluatorLMO(models, classes, models_info, model_symmetry)
     else:
         raise ValueError("Unknown dataset.")
+    evaluator.class_id_to_name = class_id_to_name
     return evaluator
 
 def build_better_pose_evaluator(args):
@@ -100,6 +146,7 @@ def build_better_pose_evaluator(args):
     """
     classes_path = args.dataset_path + args.class_info
     classes = load_classes(classes_path)
+    class_id_to_name = build_class_id_to_name(classes)
 
     models_path = args.dataset_path + args.models
     models, models_info = load_models(models_path, classes)
@@ -113,4 +160,5 @@ def build_better_pose_evaluator(args):
         evaluator = PoseEvaluatorLMO(models, classes, models_info, model_symmetry)
     else:
         raise ValueError("Unknown dataset.")
+    evaluator.class_id_to_name = class_id_to_name
     return evaluator

@@ -132,7 +132,8 @@ class PoseDataset(CocoDetection):
                  mesh_point_seed=42,
                  use_rgb_augmentation=False,
                  use_grayscale=False,
-                 augmentation_enabled=True
+                 augmentation_enabled=True,
+                 dataset_file=None,
                  ):
         """
         Args:
@@ -171,6 +172,7 @@ class PoseDataset(CocoDetection):
         self.coco = COCO(ann_file)
         self.mesh_point_seed = mesh_point_seed
         self.n_mesh_points = n_mesh_points
+        self.dataset_file = dataset_file
         self._warned_missing_model_points = set()
         # Precompute diameter lookup (id -> float)
         self._diameters = {}
@@ -203,7 +205,16 @@ class PoseDataset(CocoDetection):
         self._symmetry_info = {}
         
         # Build once needed for sym. aware L1 loss; dict[obj_id] -> (K, 3, 3) tensor of symmetry transforms
-        raw = build_symmetry_transforms(cad_models_path, K_continuous=360)
+        # The manual continuous-symmetry fallbacks are specific to YCB-V object
+        # IDs. LM-O uses sparse BOP IDs that overlap with those numbers, so
+        # applying the YCB-V table would incorrectly mark ape (1) and cat (6)
+        # as continuously symmetric.
+        missing_continuous = {} if dataset_file == "lmo" else None
+        raw = build_symmetry_transforms(
+            cad_models_path,
+            K_continuous=360,
+            missing_continuous=missing_continuous,
+        )
         self.sym_transforms, self.max_K = pad_symmetry_transforms(raw) # self.sym_transforms: {obj_id: (K, 3, 3)}
         
         if model_symmetry is not None and Path(model_symmetry).is_file():
@@ -365,7 +376,12 @@ class PoseDataset(CocoDetection):
             target["is_symmetric"] = torch.zeros(0, dtype=torch.bool)
 
         if len(labels) and "relative_rotation" in target:
-            sarr_sym_v = get_sarr_symmetry_vectors(labels).to(dtype=torch.long)
+            if self.dataset_file == "lmo":
+                # The SARR lookup is keyed by contiguous YCB-V class IDs.
+                # LM-O symmetries are represented by models_info.json below.
+                sarr_sym_v = torch.ones((len(labels), 3), dtype=torch.long)
+            else:
+                sarr_sym_v = get_sarr_symmetry_vectors(labels).to(dtype=torch.long)
             rel_rot = target["relative_rotation"].float()
             target["sarr_sym_v"] = sarr_sym_v
             target["relative_rotation_sarr"] = rotation_matrix_to_sarr(
@@ -962,7 +978,8 @@ def build(image_set, args):
                           mesh_point_seed=args.seed,
                           use_rgb_augmentation=args.rgb_augmentation,
                           use_grayscale=args.grayscale,
-                          augmentation_enabled=augmentation_enabled)
+                          augmentation_enabled=augmentation_enabled,
+                          dataset_file=getattr(args, 'dataset_file', None))
     
     if args.mosaic_augmentation and 'train' in image_set:
         print("Creating Mosaic Augmentation")
