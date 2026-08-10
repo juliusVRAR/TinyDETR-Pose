@@ -312,7 +312,7 @@ def random_affine_single(
         'relative_rotation', 'relative_rotation_gs', 'relative_quaternions',
         'relative_rotation_sarr', 'sarr_sym_v', 'object_center_2d',
         'intrinsics', 'model_points', 'is_symmetric', 'diameter',
-        'symmetry_transforms', 'area', 'iscrowd'
+        'symmetry_transforms', 'symmetry_translations', 'area', 'iscrowd'
     ]
 
     # Sync all target fields to this minimum length immediately

@@ -578,7 +578,8 @@ YCBV_MISSING_CONTINUOUS = {
 
 
 def build_symmetry_transforms(cad_models_path, K_continuous=360,
-                               missing_continuous=None):
+                               missing_continuous=None,
+                               return_translations=False):
     models_info_path = Path(cad_models_path) / "models_info.json"
     with open(models_info_path, 'r') as f:
         models_info = json.load(f)
@@ -586,23 +587,38 @@ def build_symmetry_transforms(cad_models_path, K_continuous=360,
     if missing_continuous is None:
         missing_continuous = YCBV_MISSING_CONTINUOUS
 
-    sym_dict = {}
+    rotation_dict = {}
+    translation_dict = {}
 
     for obj_id_str, info in models_info.items():
         obj_id = int(obj_id_str)
         rots = [torch.eye(3)]
+        translations = [torch.zeros(3)]
 
         # --- Discrete symmetries (from JSON) ---
         for T_flat in info.get('symmetries_discrete', []):
             T = np.array(T_flat, dtype=np.float32).reshape(4, 4)
             rots.append(torch.from_numpy(T[:3, :3].copy()))
+            translations.append(
+                torch.from_numpy(T[:3, 3].copy()) / 1000.0
+            )
 
         # --- Continuous symmetries (from JSON) ---
         found_continuous = False
         for sym in info.get('symmetries_continuous', []):
             axis = np.array(sym['axis'], dtype=np.float32)
             axis = axis / np.linalg.norm(axis)
-            rots = _add_continuous_rotations(rots, axis, K_continuous)
+            offset = np.array(
+                sym.get('offset', [0, 0, 0]),
+                dtype=np.float32,
+            )
+            rots, translations = _add_continuous_transforms(
+                rots,
+                translations,
+                axis,
+                offset,
+                K_continuous,
+            )
             found_continuous = True
 
         # --- Fallback: manual override for missing entries ---
@@ -610,18 +626,29 @@ def build_symmetry_transforms(cad_models_path, K_continuous=360,
             axis = np.array(missing_continuous[obj_id], dtype=np.float32)
             # Clear any discrete rotations — continuous supersedes them
             rots = [torch.eye(3)]
-            rots = _add_continuous_rotations(rots, axis, K_continuous)
+            translations = [torch.zeros(3)]
+            rots, translations = _add_continuous_transforms(
+                rots,
+                translations,
+                axis,
+                np.zeros(3, dtype=np.float32),
+                K_continuous,
+            )
             print(f"  obj {obj_id}: added manual continuous "
                   f"symmetry (axis={axis.tolist()}, K={K_continuous})")
 
-        sym_dict[obj_id] = torch.stack(rots)
+        rotation_dict[obj_id] = torch.stack(rots)
+        translation_dict[obj_id] = torch.stack(translations)
 
-    return sym_dict
+    if return_translations:
+        return rotation_dict, translation_dict
+    return rotation_dict
 
 
-def _add_continuous_rotations(rots, axis, K):
-    """Append K-1 evenly spaced rotations around `axis` to `rots`."""
+def _add_continuous_transforms(rots, translations, axis, offset, K):
+    """Append K-1 transforms around an axis through an object-space offset."""
     axis = axis / np.linalg.norm(axis)
+    offset = np.asarray(offset, dtype=np.float32)
     K_skew = np.array([
         [0,        -axis[2],  axis[1]],
         [axis[2],   0,       -axis[0]],
@@ -634,6 +661,21 @@ def _add_continuous_rotations(rots, axis, K):
              + (1 - np.cos(angle)) * (K_skew @ K_skew))
 
         rots.append(torch.from_numpy(R))
+        translation = (np.eye(3, dtype=np.float32) - R) @ offset
+        translations.append(torch.from_numpy(translation) / 1000.0)
+    return rots, translations
+
+
+def _add_continuous_rotations(rots, axis, K):
+    """Append K-1 rotations around an axis through the object origin."""
+    translations = [torch.zeros(3) for _ in rots]
+    rots, _ = _add_continuous_transforms(
+        rots,
+        translations,
+        axis,
+        np.zeros(3, dtype=np.float32),
+        K,
+    )
     return rots
 
 
@@ -649,6 +691,21 @@ def pad_symmetry_transforms(sym_dict):
             rots = torch.cat([rots, pad], dim=0)
         padded[obj_id] = rots
     return padded, max_K
+
+
+def pad_symmetry_translations(sym_dict, max_K):
+    """Pad symmetry translations to align with a padded rotation bank."""
+    padded = {}
+    for obj_id, translations in sym_dict.items():
+        if translations.shape[0] < max_K:
+            pad = translations.new_zeros(max_K - translations.shape[0], 3)
+            translations = torch.cat([translations, pad], dim=0)
+        elif translations.shape[0] > max_K:
+            raise ValueError(
+                f"Object {obj_id} has more symmetry translations than rotations."
+            )
+        padded[obj_id] = translations
+    return padded
 
 
 def get_sarr_symmetry_vectors(class_ids: torch.Tensor) -> torch.Tensor:

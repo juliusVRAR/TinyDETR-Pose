@@ -330,7 +330,7 @@ class PoseEvaluator(object):
             log_file.write(f"Macro accuracy: {macro_accuracy:.2f}\n")
             log_file.write(f"Micro accuracy: {micro_accuracy:.2f}\n")
 
-        return macro_accuracy
+        return micro_accuracy
 
     def evaluate_pose_adi(self, output_path):
         """
