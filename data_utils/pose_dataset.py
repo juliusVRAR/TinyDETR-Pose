@@ -15,6 +15,8 @@
 Build a dataset for the pose estimation task. This includes loading the images and annotations consisting of
 class, bounding box, relative pose and absolute poses. Moreover, data augmentation and bounding box pertubation is possible.
 """
+from __future__ import annotations
+
 import copy
 from pathlib import Path
 
@@ -749,7 +751,7 @@ def make_pose_estimation_transform(image_set, use_rgb_augmentation, use_grayscal
             normalize,
         ])
 
-    if image_set == 'test':
+    if image_set in ['test', 'test_bop']:
         return T.Compose([
             normalize,
         ])
@@ -931,6 +933,7 @@ def build(image_set, args):
         "train_synt": (root, root / "annotations" / f'train_synt.json'),
         "train_pbr": (root , root / "annotations" / f'train_pbr.json'),
         "test": (root , root / "annotations" / f'test.json'), # TODO: Whats wrong here?
+        "test_bop": (root, root / "annotations" / f'test_bop.json'),
         "keyframesd": (root, root / "annotations" / f'keyframes.json'),
         "keyframes_bop": (root, root / "annotations"/ f'keyframes_bop.json'),
         "val": (root , root / "annotations" / f'val.json'),

@@ -13,6 +13,8 @@
 """
 cleaned main file
 """
+from __future__ import annotations
+
 import argparse
 import datetime
 import json
@@ -36,8 +38,10 @@ from util.get_param_dicts import get_param_dict
 import util.misc as utils
 from util.utils import ModelEma, BestMetricHolder, clean_state_dict
 from util.benchmark import benchmark
-from evaluation_tools.pose_evaluator_init import build_pose_evaluator, build_better_pose_evaluator
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ModuleNotFoundError:
+    SummaryWriter = None
 
 
 COCO_BBOX_METRIC_NAMES = (
@@ -526,7 +530,11 @@ def get_args_parser():
     parser.add_argument('--ema_decay', default=0.9997, type=float)
     parser.add_argument('--num_workers', default=2, type=int)
 
-    parser.add_argument('--eval_bop', action='store_true', help="Run model in BOP challenge evaluation mode")
+    parser.add_argument(
+        '--eval_bop',
+        action='store_true',
+        help="Export official BOP19 6D-localization results (6d rotation representation only)",
+    )
 
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
     # distributed training parameters
@@ -619,6 +627,8 @@ def should_run_pose_eval(epoch: int, total_epochs: int, warmup_epochs: int) -> b
 def main(args):
     if args.augmentation_start_epoch < 0:
         raise ValueError('--augmentation_start_epoch must be >= 0')
+    if args.eval_bop and args.rotation_representation != '6d':
+        raise ValueError('--eval_bop only supports --rotation_representation 6d')
 
     if args.eval_only:
         args.eval = True
@@ -635,6 +645,8 @@ def main(args):
      # TensorBoard writer
     writer = None
     if getattr(args, "tensorboard", False):
+        if SummaryWriter is None:
+            raise RuntimeError("--tensorboard requires the optional tensorboard package")
         log_dir = Path(args.output_dir) / "tb" if args.output_dir else Path("./tb")
         log_dir.mkdir(parents=True, exist_ok=True)
         writer = SummaryWriter(str(log_dir))
@@ -646,8 +658,14 @@ def main(args):
 
     model, criterion, postprocessors, matcher = build_model(args)
     model.to(device)
-    # TODO: Check which one is better in terms of runtime speed
-    pose_evaluator = build_pose_evaluator(args)
+    # BOP export is scored by the official toolkit and does not need the
+    # repository's legacy ADD evaluator or its extra metadata files.
+    pure_bop_export = args.eval_bop and not (args.eval or args.eval_only or args.pose_eval_only)
+    if pure_bop_export:
+        pose_evaluator = None
+    else:
+        from evaluation_tools.pose_evaluator_init import build_pose_evaluator
+        pose_evaluator = build_pose_evaluator(args)
     #pose_evaluator = build_better_pose_evaluator(args)
     if args.use_ema:
         ema_m = ModelEma(model, decay=args.ema_decay)
@@ -714,23 +732,30 @@ def main(args):
     )
     
     # Build the dataset for training and validation
-    dataset_train = build_dataset(image_set=args.train_set, args=args)
+    needs_training_data = not (args.eval or args.pose_eval_only or args.eval_bop)
+    dataset_train = build_dataset(image_set=args.train_set, args=args) if needs_training_data else None
     # dataset_train = build_train_dataset(image_set=args.train_set, args=args)
     dataset_val = build_dataset(image_set=args.eval_set, args=args)
     # dataset_val_coco = build_dataset_coco(image_set='val', args=args)
 
     if args.distributed:
-        sampler_train = DistributedSampler(dataset_train)
+        sampler_train = DistributedSampler(dataset_train) if dataset_train is not None else None
         sampler_val = DistributedSampler(dataset_val, shuffle=False)
     else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_train = torch.utils.data.RandomSampler(dataset_train) if dataset_train is not None else None
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
-    batch_sampler_train = torch.utils.data.BatchSampler(
-        sampler_train, args.batch_size, drop_last=True)
-
-    data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
+    if dataset_train is not None:
+        batch_sampler_train = torch.utils.data.BatchSampler(
+            sampler_train, args.batch_size, drop_last=True)
+        data_loader_train = DataLoader(
+            dataset_train,
+            batch_sampler=batch_sampler_train,
+            collate_fn=utils.collate_fn,
+            num_workers=args.num_workers,
+        )
+    else:
+        data_loader_train = None
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, 
                                  num_workers=args.num_workers)
@@ -831,7 +856,7 @@ def main(args):
             if utils.is_main_process() and resume_epoch is not None:
                 print(f'Resumed training from checkpoint epoch {resume_epoch} (next epoch: {args.start_epoch}).')
 
-    if utils.is_main_process():
+    if utils.is_main_process() and not args.eval_bop:
         print("Get benchmark")
         benchmark_model = copy.deepcopy(model_without_ddp)
         bm = benchmark(benchmark_model.float(), dataset_val, output_dir)
@@ -884,9 +909,21 @@ def main(args):
         return
     # Evaluate the model for the BOP challenge
     if args.eval_bop:
-        print(args.dataset)
-        bop_evaluate(model, matcher, data_loader_val, args.eval_set, args.bbox_mode,
-                     args.rotation_representation, device, args.output_dir, args.dataset)
+        if utils.is_main_process():
+            bop_loader = data_loader_pose_val if data_loader_pose_val is not None else data_loader_val
+            bop_model = ema_m.module if args.use_ema else model_without_ddp
+            bop_evaluate(
+                bop_model,
+                bop_loader,
+                args.eval_set,
+                args.bbox_mode,
+                args.rotation_representation,
+                device,
+                args.output_dir,
+                args.dataset_file,
+            )
+        if args.distributed:
+            torch.distributed.barrier()
         return
 
 

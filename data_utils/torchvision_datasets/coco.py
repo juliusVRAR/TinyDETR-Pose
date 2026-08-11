@@ -134,17 +134,18 @@ class CocoDetection(VisionDataset):
         if "type" in coco.imgs[img_id]:
             if coco.imgs[img_id]["type"] == "synt":
                 synthetic = True
-                mode = "RGBA"
+                # Alpha is only needed by the optional background-compositing
+                # path. Without a background, always return the 3-channel RGB
+                # input expected by normalization and the model.
+                if self.synthetic_background is not None:
+                    mode = "RGBA"
 
         img = self.get_image(path, mode)
         # Load a random background image if image is synthetic
-        if synthetic:
-            if self.synthetic_background is None:
-                print("DataLoader tries to load a synthetic background, but none is provided. Skipping this step.")
-            else:
-                background_img = self.get_background(img.size)
-                background_img.paste(img, (0, 0), img)
-                img = background_img.copy()
+        if synthetic and self.synthetic_background is not None:
+            background_img = self.get_background(img.size)
+            background_img.paste(img, (0, 0), img)
+            img = background_img.copy()
 
         if self.transforms is not None:
             img, target = self.transforms(img, target)

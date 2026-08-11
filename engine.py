@@ -27,7 +27,15 @@ import os
 import numpy as np
 import time
 from evaluation_tools.metrics import get_src_permutation_idx, calc_rotation_error, calc_translation_error
-from evaluation_tools.pose_evaluator_init import resolve_pose_class_name
+from evaluation_tools.bop import (
+    BOP19_HEADER,
+    format_bop_result,
+    make_bop_result_filename,
+    parse_bop_image_ids,
+    require_6d_rotation,
+    select_localization_queries,
+    validate_bop19_dataset_targets,
+)
 from util.rotation_utils import rotation_6d_to_matrix
 DEBUG = False
 DEBUG_OUT=Path("debug")
@@ -414,6 +422,8 @@ def pose_evaluate(model,
     """
     Evaluate PoET on the whole dataset, calculate the evaluation metrics and store the final performance.
     """
+    from evaluation_tools.pose_evaluator_init import resolve_pose_class_name
+
     model.eval()
     matcher.eval()
     model_without_ddp = model.module if hasattr(model, "module") else model
@@ -561,56 +571,99 @@ def pose_evaluate(model,
     return pose_metrics
 
 @torch.no_grad()
-def bop_evaluate(model, matcher, data_loader, image_set, bbox_mode, rotation_mode, device, output_dir):
+def bop_evaluate(
+    model,
+    data_loader,
+    image_set,
+    bbox_mode,
+    rotation_mode,
+    device,
+    output_dir,
+    dataset_name,
+):
+    """Export target-conditioned predictions for BOP19 6D localization.
+
+    Only the target object IDs and their multiplicities are used. Ground-truth
+    boxes and poses are deliberately not passed to the model or matcher.
     """
-    Evaluate PoET on the dataset and store the results in the BOP format
-    """
+    require_6d_rotation(rotation_mode)
+
     model.eval()
-    matcher.eval()
-
-    output_eval_dir = output_dir + "/bop_" + bbox_mode + "/"
-    Path(output_eval_dir).mkdir(parents=True, exist_ok=True)
-
-    out_csv_file = open(output_eval_dir + 'ycbv.csv', 'w')
-    out_csv_file.write("scene_id,im_id,obj_id,score,R,t,time")
+    targets_path = validate_bop19_dataset_targets(data_loader.dataset)
+    print(f"Validated BOP19 targets from {targets_path}")
+    output_eval_dir = Path(output_dir) / f"bop_{bbox_mode}"
+    output_eval_dir.mkdir(parents=True, exist_ok=True)
+    result_path = output_eval_dir / make_bop_result_filename(dataset_name)
     n_images = len(data_loader.dataset.ids)
+    processed_images = 0
 
-    # CSV format: scene_id, im_id, obj_id, score, R, t, time
-    counter = 1
-    for samples, targets in data_loader:
-        samples = samples.to(device)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-        pred_start_time = time.time()
-        outputs, n_boxes_per_sample = model(samples, targets)
-        pred_end_time = time.time() - pred_start_time
-        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs'}
+    with result_path.open("w", encoding="utf-8", newline="") as out_csv_file:
+        out_csv_file.write(BOP19_HEADER + "\n")
 
-        indices = matcher(outputs_without_aux, targets, n_boxes_per_sample)
-        idx = get_src_permutation_idx(indices)
+        for samples, targets in data_loader:
+            samples = samples.to(device)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            batch_start_time = time.perf_counter()
 
-        pred_translations = outputs_without_aux["pred_translation"][idx].detach().cpu().numpy()
-        pred_rotations = outputs_without_aux["pred_rotation"][idx].detach().cpu().numpy()
+            # Do not provide test annotations to the model. They contain private
+            # evaluation information beyond the legal BOP target IDs/counts.
+            outputs = model(samples)
+            pred_logits = outputs["pred_logits"]
+            pred_rotations = outputs["pred_rotations"]
+            pred_translations = outputs["pred_translations"]
+            if pred_rotations.shape[-2:] != (3, 3):
+                raise ValueError(
+                    "BOP evaluation requires 6D rotations decoded to 3x3 matrices; "
+                    f"got shape {tuple(pred_rotations.shape)}"
+                )
 
-        obj_classes_idx = torch.cat([t['labels'][i] for t, (_, i) in zip(targets, indices)],
-                                    dim=0).detach().cpu().numpy()
+            batch_results = []
+            for batch_index, target in enumerate(targets):
+                query_indices, object_ids, scores = select_localization_queries(
+                    pred_logits[batch_index],
+                    target["labels"],
+                )
+                image_info = data_loader.dataset.coco.loadImgs(
+                    int(target["image_id"].item())
+                )[0]
+                scene_id, im_id = parse_bop_image_ids(image_info["file_name"])
 
-        img_files = [data_loader.dataset.coco.loadImgs(t["image_id"].item())[0]['file_name'] for t, (_, i) in
-                     zip(targets, indices) for _ in range(0, len(i))]
+                rotations = pred_rotations[batch_index, query_indices].detach().cpu().numpy()
+                translations_mm = (
+                    pred_translations[batch_index, query_indices].detach().cpu().numpy() * 1000.0
+                )
+                object_ids = object_ids.detach().cpu().tolist()
+                scores = scores.detach().cpu().tolist()
+                for obj_id, score, rotation, translation_mm in zip(
+                    object_ids,
+                    scores,
+                    rotations,
+                    translations_mm,
+                ):
+                    batch_results.append(
+                        (scene_id, im_id, obj_id, score, rotation, translation_mm)
+                    )
 
-        for cls_idx, img_file, pred_translation, pred_rotation in zip(obj_classes_idx, img_files, pred_translations, pred_rotations):
-            file_info = img_file.split("/")
-            scene_id = int(file_info[1])
-            img_id = int(file_info[3][:file_info[3].rfind(".")])
-            obj_id = cls_idx
-            score = 1.0
-            csv_str = "{},{},{},{},{} {} {} {} {} {} {} {} {}, {} {} {}, {}\n".format(scene_id, img_id, obj_id, score,
-                                                                                    pred_rotation[0, 0], pred_rotation[0, 1], pred_rotation[0, 2],
-                                                                                    pred_rotation[1, 0], pred_rotation[1, 1], pred_rotation[1, 2],
-                                                                                    pred_rotation[2, 0], pred_rotation[2, 1], pred_rotation[2, 2],
-                                                                                    pred_translation[0] * 1000, pred_translation[1] * 1000, pred_translation[2] * 1000,
-                                                                                    pred_end_time)
-            out_csv_file.write(csv_str)
-        print("Processed {}/{}".format(counter, n_images))
-        counter += 1
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            runtime_per_image = (time.perf_counter() - batch_start_time) / max(1, len(targets))
+            for scene_id, im_id, obj_id, score, rotation, translation_mm in batch_results:
+                out_csv_file.write(
+                    format_bop_result(
+                        scene_id,
+                        im_id,
+                        obj_id,
+                        score,
+                        rotation,
+                        translation_mm,
+                        runtime_per_image,
+                    )
+                    + "\n"
+                )
 
-    out_csv_file.close()
+            processed_images += len(targets)
+            print(f"Processed {processed_images}/{n_images}")
+
+    print(f"Wrote BOP19 {dataset_name.upper()} results to {result_path}")
+    return result_path

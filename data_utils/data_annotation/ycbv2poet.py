@@ -4,9 +4,32 @@
 # Licensed under the BSD-2-Clause-License with no commercial use [see LICENSE for details]
 # ------------------------------------------------------------------------
 
+import argparse
 import json
 import os
 
+
+parser = argparse.ArgumentParser(description="Convert BOP YCB-V annotations to PoET COCO format.")
+parser.add_argument(
+    "--dataset-root",
+    default="/workspace/LWDETR/data/datasets/bop/ycbv",
+    help="YCB-V root containing test, models, and test_targets_bop19.json.",
+)
+parser.add_argument(
+    "--output-dir",
+    default=None,
+    help="Annotation output directory (default: <dataset-root>/annotations).",
+)
+parser.add_argument(
+    "--test-targets",
+    default=None,
+    help="Optional path to test_targets_bop19.json.",
+)
+args = parser.parse_args()
+
+base_path = os.path.abspath(args.dataset_root)
+output_base_path = args.output_dir or os.path.join(base_path, 'annotations')
+os.makedirs(output_base_path, exist_ok=True)
 
 # Parameter Initialization
 annotation_set = "test"  # Choices: train, test
@@ -65,7 +88,8 @@ elif annotation_set == "test":
             keyframe_info = [line.rstrip() for line in file]
     elif test_set == "bop":
         # Annotate only the frames used for the BOP challenge
-        data_paths = ['test_bop/']
+        bop_test_dir = 'test_bop/' if os.path.isdir(os.path.join(base_path, 'test_bop')) else 'test/'
+        data_paths = [bop_test_dir]
         img_types = ['real']
         annotation_path = 'test_bop.json'
         only_keyframes = False
@@ -76,8 +100,28 @@ else:
     print("The annotation set '{}' is not supported.".format(annotation_set))
     exit()
 
-base_path = '/workspace/LWDETR/data/datasets/bop/'
-output_base_path = '/workspace/LWDETR/data/datasets/bop/ycbv/annotations/'
+test_targets_by_image = None
+if annotation_set == "test" and test_set == "bop":
+    if args.test_targets is not None:
+        targets_candidates = [os.path.abspath(args.test_targets)]
+    else:
+        targets_candidates = [
+            os.path.join(base_path, "test_targets_bop19.json"),
+            os.path.join(base_path, "ycbv", "test_targets_bop19.json"),
+        ]
+    targets_path = next((path for path in targets_candidates if os.path.isfile(path)), None)
+    if targets_path is None:
+        raise FileNotFoundError(
+            f"Official BOP localization targets not found. Checked: {targets_candidates}"
+        )
+    with open(targets_path, "r") as target_file:
+        test_targets = json.load(target_file)
+    test_targets_by_image = {}
+    for target in test_targets:
+        image_key = (int(target["scene_id"]), int(target["im_id"]))
+        test_targets_by_image.setdefault(image_key, {})[
+            int(target["obj_id"])
+        ] = int(target["inst_count"])
 
 categories = [
     {'supercategory': 'background', 'id': 0, 'name': 'background'},
@@ -113,19 +157,21 @@ annotations_removed = 0
 for data_path, img_type in zip(data_paths, img_types):
     print("Annotating: {}".format(data_path))
     # Get List of all subdirectories
-    image_dirs = [d.name for d in os.scandir(base_path + data_path) if d.is_dir()]
+    split_path = os.path.join(base_path, data_path)
+    image_dirs = [d.name for d in os.scandir(split_path) if d.is_dir()]
     image_dirs.sort()
 
     for img_dir in image_dirs:
         print("Image Directory: {}".format(img_dir))
-        img_dir_path = base_path + data_path + img_dir + '/'
-        img_names = [img for img in os.listdir(img_dir_path + 'rgb/') if img[img.rfind('.'):] in ['.png', '.jpg']]
+        img_dir_path = os.path.join(split_path, img_dir)
+        rgb_path = os.path.join(img_dir_path, 'rgb')
+        img_names = [img for img in os.listdir(rgb_path) if img[img.rfind('.'):] in ['.png', '.jpg']]
         img_names.sort()
-        with open(img_dir_path + 'scene_gt_info.json', 'r') as f:
+        with open(os.path.join(img_dir_path, 'scene_gt_info.json'), 'r') as f:
             bbox_annotations = json.load(f)
-        with open(img_dir_path + 'scene_gt.json', 'r') as f:
+        with open(os.path.join(img_dir_path, 'scene_gt.json'), 'r') as f:
             pose_annotations = json.load(f)
-        with open(img_dir_path + 'scene_camera.json', 'r') as f:
+        with open(os.path.join(img_dir_path, 'scene_camera.json'), 'r') as f:
             camera_annotations = json.load(f)
         # Check if annotation length is the same
         n_imgs = len(img_names)
@@ -137,22 +183,56 @@ for data_path, img_type in zip(data_paths, img_types):
             raise ValueError
 
         # Iterate over all images and annotations and create dict entries
-        for img_name, b_k, p_k, c_k in zip(img_names, bbox_annotations, pose_annotations, camera_annotations):
+        for img_name in img_names:
             if only_keyframes:
                 if img_dir[2:] + '/' + img_name[:img_name.rfind('.png')] not in keyframe_info:
                     # Skip images that are not Keyframes
                     continue
-            img_path = img_dir_path + 'rgb/' + img_name
+            image_key = str(int(os.path.splitext(img_name)[0]))
+            if not all(
+                image_key in source
+                for source in (bbox_annotations, pose_annotations, camera_annotations)
+            ):
+                raise KeyError(
+                    f"Missing BOP metadata for {data_path}{img_dir}/rgb/{img_name} "
+                    f"(image key {image_key})"
+                )
             img_annotation_counter = 0
-            file_name = data_path + img_dir + '/rgb/' + img_name
-            bbox_data = bbox_annotations[b_k]
-            pose_data = pose_annotations[p_k]
-            camera_data = camera_annotations[c_k]
+            file_name = "/".join((data_path.strip('/'), img_dir, 'rgb', img_name))
+            bbox_data = bbox_annotations[image_key]
+            pose_data = pose_annotations[image_key]
+            camera_data = camera_annotations[image_key]
 
-            for bbox, pose, in zip(bbox_data, pose_data):
+            selected_test_indices = None
+            if test_targets_by_image is not None:
+                scene_id = int(img_dir)
+                im_id = int(os.path.splitext(img_name)[0])
+                target_counts = test_targets_by_image.get((scene_id, im_id))
+                if target_counts is None:
+                    continue
+                selected_test_indices = set()
+                for target_obj_id, inst_count in target_counts.items():
+                    candidates = [
+                        index for index, pose in enumerate(pose_data)
+                        if int(pose['obj_id']) == target_obj_id
+                    ]
+                    if len(candidates) < inst_count:
+                        raise ValueError(
+                            f"BOP target requests {inst_count} instance(s) of object "
+                            f"{target_obj_id} in scene {scene_id}, image {im_id}, but "
+                            f"only {len(candidates)} GT instance(s) were found"
+                        )
+                    candidates.sort(
+                        key=lambda index: bbox_data[index]['visib_fract'],
+                        reverse=True,
+                    )
+                    selected_test_indices.update(candidates[:inst_count])
+
+            for gt_index, (bbox, pose) in enumerate(zip(bbox_data, pose_data)):
+                if selected_test_indices is not None and gt_index not in selected_test_indices:
+                    continue
                 # If percentage of visible pixels is close to 0 --> skip
-                # In the BOP challenge all bounding boxes are annotated regardless of whether the bounding boxes are visible or not
-                if bbox['visib_fract'] < 0.05:
+                if test_targets_by_image is None and bbox['visib_fract'] < 0.05:
                     annotations_removed += 1
                     continue
                 # Check if bbox starts / ends ouatside of imge --> set to 0 or img boundary simply
@@ -212,6 +292,6 @@ for data_path, img_type in zip(data_paths, img_types):
             image_id += 1
 
 print("Annotations Removed: {}".format(annotations_removed))
-with open(output_base_path + annotation_path, 'w') as out_file:
+with open(os.path.join(output_base_path, annotation_path), 'w') as out_file:
     json.dump(annotations, out_file)
-print("Wrote annotations to: {}".format(output_base_path + annotation_path))
+print("Wrote annotations to: {}".format(os.path.join(output_base_path, annotation_path)))

@@ -130,7 +130,7 @@ class MSDeformAttn(nn.Module):
                 'Last dim of reference_points must be 2 or 4, but get {} instead.'.format(reference_points.shape[-1]))
         attention_weights = F.softmax(attention_weights, -1)
 
-        if self._export or value.dtype == torch.half:
+        if self._export or value.dtype == torch.half or not MSDeformAttnFunction.available:
             value = value.transpose(1, 2).contiguous().view(N, self.n_heads, self.d_model // self.n_heads, Len_in)
             output = ms_deform_attn_core_pytorch(
                 value, input_spatial_shapes, sampling_locations, attention_weights)

@@ -9,6 +9,8 @@ The data augmentation procedures were interpreted from @weiliu89's SSD paper
 http://arxiv.org/abs/1512.02325
 """
 
+from __future__ import annotations
+
 import math
 import random
 from matplotlib import image

@@ -9,6 +9,7 @@
 data/coco/
 data/obj365/
 data/lmo
+data/ycbv
 experiment-*
 *.tmp
 *.pkl
