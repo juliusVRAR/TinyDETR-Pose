@@ -3,9 +3,6 @@
 Quick steps to get the pose estimation pipeline running.
 
 ## Prerequisites
-- Docker installed and running
-- VS Code + “Dev Containers” extension
-- Access to the NAS to fetch the debug dataset
 - NVIDIA GPU drivers (recommended; the container/tooling handles CUDA)
 
 ## 1) Git: clone and checkout branch
