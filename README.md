@@ -4,7 +4,7 @@ Real-time 6DoF object pose estimation on resource-constrained hardware remains c
 
 Link to preprint:
 https://arxiv.org/abs/2608.15297
-### Accepted at ECCV-W 2026 : 11th Workshop on Recovering 6D Object Pose (R6D)
+### Accepted at ECCV Workshops 2026 : 11th Workshop on Recovering 6D Object Pose (R6D)
 
 #### Steps to get the pose estimation pipeline running.
 ## Prerequisites
